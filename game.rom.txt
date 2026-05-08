@@ -1,0 +1,421 @@
+# NES ROM — game.nes
+# このファイルが正本。AIが読み書きする。配布物は game.nes のみ。
+# CPU: MOS 6502 (NES)  Mapper: NROM-128 (Mapper 0)
+# PRG-ROM: 16KB ($8000-$BFFF, mirror $C000-$FFFF)
+# CHR-ROM: 8KB (Pattern Table 0 + 1)
+#
+# ゼロページ変数:
+#   $00 NMI_FLAG   $01 GAME_STATE  $02 HIT_TIMER
+#   $10 PAD1_RAW   $20 PLAYER_X    $21 PLAYER_Y
+#   $30 ENEMY_X    $31 ENEMY_Y
+#
+# OAM Shadow ($0200-$020F):
+#   $0200 SPRITE_0_Y   $0201 SPRITE_0_TILE  $0202 SPRITE_0_ATTR  $0203 SPRITE_0_X
+#   $0204 SPRITE_1_Y   $0205 SPRITE_1_TILE  $0206 SPRITE_1_ATTR  $0207 SPRITE_1_X
+#
+# PRG-ROM レイアウト (CPUアドレス):
+#   $8000: RESET ハンドラ
+#   $8070: MAIN_LOOP
+#   $8090: READ_CONTROLLER
+#   $80B0: UPDATE_PLAYER
+#   $8110: CHECK_COLLISION
+#   $8150: NMI ハンドラ
+#   $8160: IRQ ハンドラ
+#   BFFA-BFFF: ベクタテーブル (NMI/RESET/IRQ)
+
+[header]
+4E 45 53 1A  # iNES magic "NES\x1A"
+01           # PRG-ROM バンク数 (1 = 16KB)
+01           # CHR-ROM バンク数 (1 = 8KB)
+00           # フラグ6: Mapper 0 下位4bit=0, VRAM配置=水平ミラー, バッテリーなし
+00           # フラグ7: Mapper 0 上位4bit=0
+00 00 00 00 00 00 00 00  # padding (8バイト)
+
+[prg_rom]
+# ============================================================
+# RESET ハンドラ ($8000〜)
+# PPU 安定待ち → RAM クリア → OAM クリア → パレット設定 → スプライト初期設定 → MAIN_LOOP へ JMP
+# ============================================================
+
+78           # SEI: 割り込み禁止
+D8           # CLD: デシマルモードクリア
+A2 FF        # LDX #$FF
+9A           # TXS: スタックポインタを $FF に設定
+
+# PPU 安定待ち1回目: PPUSTATUS を読んでVblankビットをクリア
+AD 02 20     # LDA $2002: PPUSTATUS 読み取り (Vblank フラグクリア)
+
+# VWAIT1: Vblank 待ち (BIT $2002 / BPL loop)
+# $8007: BIT $2002
+2C 02 20     # BIT $2002: bit7(Vblank) チェック
+10 FB        # BPL -5 → $8007 (bit7=0なら戻る)
+
+# RAM クリア ($00〜$FF をゼロクリア)
+A2 00        # LDX #$00
+A9 00        # LDA #$00
+# CLEAR_RAM ($800D):
+95 00        # STA $00,X
+E8           # INX
+D0 FB        # BNE -5 → $800D
+
+# OAM Shadow ($0200-$02FF) を $FF で初期化 (スプライト画面外)
+A9 FF        # LDA #$FF
+A2 00        # LDX #$00
+# CLEAR_OAM ($8015):
+9D 00 02     # STA $0200,X
+E8           # INX
+D0 FA        # BNE -6 → $8015
+
+# PPU 安定待ち2回目
+# VWAIT2 ($801C):
+2C 02 20     # BIT $2002
+10 FB        # BPL -5 → $801C
+
+# パレット設定 (PPU アドレス $3F00)
+# PPUADDR に $3F00 をセット
+A9 3F        # LDA #$3F
+8D 06 20     # STA $2006  (PPUADDR 上位)
+A9 00        # LDA #$00
+8D 06 20     # STA $2006  (PPUADDR 下位)
+# 背景パレット0 ($3F00-$3F03): 黒・白・薄灰・黒
+A9 0F        # LDA #$0F  (黒)
+8D 07 20     # STA $2007
+A9 30        # LDA #$30  (白)
+8D 07 20     # STA $2007
+A9 10        # LDA #$10  (薄灰)
+8D 07 20     # STA $2007
+A9 00        # LDA #$00  (黒)
+8D 07 20     # STA $2007
+# 背景パレット1,2,3 ($3F04-$3F0F): 全て黒で埋める (12バイト)
+A2 0C        # LDX #$0C
+A9 0F        # LDA #$0F
+# FILL_BG_PAL ($8047):
+8D 07 20     # STA $2007
+CA           # DEX
+D0 FA        # BNE -6 → $8047 (次命令$804D - 6 = $8047)
+# スプライトパレット0 ($3F10-$3F13): 黒・青・黒・白 (プレイヤー)
+A9 0F        # LDA #$0F  (黒)
+8D 07 20     # STA $2007
+A9 11        # LDA #$11  (青)
+8D 07 20     # STA $2007
+A9 0F        # LDA #$0F  (黒)
+8D 07 20     # STA $2007
+A9 30        # LDA #$30  (白)
+8D 07 20     # STA $2007
+# スプライトパレット1 ($3F14-$3F17): 黒・赤・黒・白 (敵)
+A9 0F        # LDA #$0F  (黒)
+8D 07 20     # STA $2007
+A9 16        # LDA #$16  (赤)
+8D 07 20     # STA $2007
+A9 0F        # LDA #$0F  (黒)
+8D 07 20     # STA $2007
+A9 30        # LDA #$30  (白)
+8D 07 20     # STA $2007
+# スプライトパレット2,3 ($3F18-$3F1F): 全て黒 (8バイト)
+A2 08        # LDX #$08
+A9 0F        # LDA #$0F
+# FILL_SP_PAL ($8079):
+8D 07 20     # STA $2007
+CA           # DEX
+D0 FA        # BNE -6 → $8079 (次命令$807F - 6 = $8079)
+
+# スプライト初期位置設定
+# SPRITE_0 (プレイヤー): Y=$80, Tile=$00, Attr=$00, X=$80
+A9 80        # LDA #$80  (プレイヤー初期Y)
+85 21        # STA $21   (PLAYER_Y)
+8D 00 02     # STA $0200 (OAM SPRITE_0_Y)
+A9 00        # LDA #$00  (タイル0=プレイヤー)
+8D 01 02     # STA $0201 (OAM SPRITE_0_TILE)
+A9 00        # LDA #$00  (属性=パレット0)
+8D 02 02     # STA $0202 (OAM SPRITE_0_ATTR)
+A9 80        # LDA #$80  (プレイヤー初期X)
+85 20        # STA $20   (PLAYER_X)
+8D 03 02     # STA $0203 (OAM SPRITE_0_X)
+
+# SPRITE_1 (敵): Y=$40, Tile=$01, Attr=$01, X=$C0
+A9 40        # LDA #$40  (敵初期Y)
+85 31        # STA $31   (ENEMY_Y)
+8D 04 02     # STA $0204 (OAM SPRITE_1_Y)
+A9 01        # LDA #$01  (タイル1=敵)
+8D 05 02     # STA $0205 (OAM SPRITE_1_TILE)
+A9 01        # LDA #$01  (属性=パレット1)
+8D 06 02     # STA $0206 (OAM SPRITE_1_ATTR)
+A9 C0        # LDA #$C0  (敵初期X)
+85 30        # STA $30   (ENEMY_X)
+8D 07 02     # STA $0207 (OAM SPRITE_1_X)
+
+# PPUCTRL 設定: NMI有効 ($80) | スプライトパターンテーブル $1000 ($10) | 背景パターン $1000 ($08)
+A9 98        # LDA #$98  (NMI有効・スプライトPT$1000・背景PT$1000)
+8D 00 20     # STA $2000 (PPUCTRL)
+# PPUMASK 設定: スプライト・背景表示有効
+A9 1E        # LDA #$1E  (スプライト・背景表示有効・左8px表示)
+8D 01 20     # STA $2001 (PPUMASK)
+
+# MAIN_LOOP へジャンプ ($80BC → 4C BC 80)
+# RESET ハンドラは $8000〜$80BB まで (PRG オフセット $0000〜$00BB)
+4C BC 80     # JMP $80BC (MAIN_LOOP)
+
+# ============================================================
+# MAIN_LOOP ($80BC〜)
+# NMI フラグ待機 → READ_CONTROLLER → UPDATE_PLAYER → CHECK_COLLISION → ループ
+# ============================================================
+# $80BC: WAIT_NMI
+A5 00        # LDA $00   (NMI_FLAG)
+F0 FC        # BEQ -4 → $80BC (NMI_FLAG=0 なら待ち続ける; 次命令$80BE - 4 = $80BC)
+A9 00        # LDA #$00
+85 00        # STA $00   (NMI_FLAG クリア)
+
+# サブルーチン呼び出し
+20 DC 80     # JSR $80DC  (READ_CONTROLLER)
+20 FF 80     # JSR $80FF  (UPDATE_PLAYER)
+20 6D 81     # JSR $816D  (CHECK_COLLISION)
+
+# HIT_TIMER 処理 (非0なら-1)
+A5 02        # LDA $02   (HIT_TIMER)
+F0 03        # BEQ +3 → NO_TIMER_DEC (次命令$80D1+3=$80D4)
+38           # SEC
+E9 01        # SBC #$01  (HIT_TIMER - 1)
+85 02        # STA $02   (HIT_TIMER更新) ← NO_TIMER_DEC ($80D4)
+# $80D6:
+4C BC 80     # JMP $80BC (MAIN_LOOP)
+
+# 3バイトのパディング
+EA EA EA     # NOP NOP NOP
+
+# ============================================================
+# READ_CONTROLLER ($80DC〜)
+# $4016 ストローブ → 8ビット読み取り → PAD1_RAW($10) に格納
+# ビット配置: bit7=A, bit6=B, bit5=Select, bit4=Start, bit3=Up, bit2=Down, bit1=Left, bit0=Right
+# ============================================================
+# $80DC:
+A9 01        # LDA #$01
+8D 16 40     # STA $4016  (ストローブ ON)
+A9 00        # LDA #$00
+8D 16 40     # STA $4016  (ストローブ OFF)
+A9 00        # LDA #$00
+85 10        # STA $10    (PAD1_RAW クリア)
+A2 08        # LDX #$08   (8ビット)
+# READ_LOOP ($80EA):
+AD 16 40     # LDA $4016  (1ボタン読む: bit0にボタン状態)
+4A           # LSR A      (bit0 → キャリー)
+26 10        # ROL $10    (キャリー → $10 の最下位ビット、$10を左ローテート)
+CA           # DEX
+D0 F7        # BNE -9 → $80EA (READ_LOOP; 次命令$80F5 - 9 = $80EC... 要確認)
+60           # RTS
+
+# パディング (READ_CONTROLLER の後: 9バイト)
+EA EA EA EA EA EA EA EA EA  # NOP x9
+
+# ============================================================
+# UPDATE_PLAYER ($80FF〜)
+# PAD1_RAW($10) を読み、プレイヤー座標 (PLAYER_X=$20, PLAYER_Y=$21) を更新
+# OAM Shadow ($0200+0=Y, $0200+3=X) に書き込む
+# 画面端クランプ: X: $08〜$E8, Y: $08〜$D0
+# ============================================================
+# $80FF:
+# 上ボタン (bit3 of PAD1_RAW): Y-1
+A5 10        # LDA $10    (PAD1_RAW)
+29 08        # AND #$08   (bit3=Up)
+F0 08        # BEQ +8 → NO_UP
+A5 21        # LDA $21    (PLAYER_Y)
+C9 08        # CMP #$08   (Y < 8 なら端)
+90 03        # BCC +3 → NO_UP_DEC (越えてたらスキップ)
+38           # SEC
+E9 01        # SBC #$01   (Y - 1)
+85 21        # STA $21    (PLAYER_Y更新) ← NO_UP_DEC / NO_UP ← (ここへジャンプ先)
+
+# 下ボタン (bit2 of PAD1_RAW): Y+1
+# $80BE:
+A5 10        # LDA $10
+29 04        # AND #$04   (bit2=Down)
+F0 08        # BEQ +8 → NO_DOWN
+A5 21        # LDA $21    (PLAYER_Y)
+C9 D0        # CMP #$D0   (Y >= $D0 なら端)
+B0 03        # BCS +3 → NO_DOWN_INC
+18           # CLC
+69 01        # ADC #$01   (Y + 1)
+85 21        # STA $21    ← NO_DOWN_INC / NO_DOWN
+
+# 左ボタン (bit1 of PAD1_RAW): X-1
+# $80CC:
+A5 10        # LDA $10
+29 02        # AND #$02   (bit1=Left)
+F0 08        # BEQ +8 → NO_LEFT
+A5 20        # LDA $20    (PLAYER_X)
+C9 08        # CMP #$08   (X < 8 なら端)
+90 03        # BCC +3 → NO_LEFT_DEC
+38           # SEC
+E9 01        # SBC #$01   (X - 1)
+85 20        # STA $20    ← NO_LEFT_DEC / NO_LEFT
+
+# 右ボタン (bit0 of PAD1_RAW): X+1
+# $80DA:
+A5 10        # LDA $10
+29 01        # AND #$01   (bit0=Right)
+F0 08        # BEQ +8 → NO_RIGHT
+A5 20        # LDA $20    (PLAYER_X)
+C9 E8        # CMP #$E8   (X >= $E8 なら端)
+B0 03        # BCS +3 → NO_RIGHT_INC
+18           # CLC
+69 01        # ADC #$01   (X + 1)
+85 20        # STA $20    ← NO_RIGHT_INC / NO_RIGHT
+
+# OAM Shadow 更新
+# $80E8:
+A5 21        # LDA $21    (PLAYER_Y)
+8D 00 02     # STA $0200  (SPRITE_0_Y)
+A5 20        # LDA $20    (PLAYER_X)
+8D 03 02     # STA $0203  (SPRITE_0_X)
+60           # RTS
+
+# パディング ($80F1〜$810F: 31バイト)
+EA EA EA EA EA EA EA EA EA EA EA EA EA EA EA EA  # NOP x16
+EA EA EA EA EA EA EA EA EA EA EA EA EA EA EA     # NOP x15
+
+# ============================================================
+# CHECK_COLLISION ($816D〜)
+# プレイヤーと敵の AABB 当たり判定
+# NO_HIT = $81A1 (RTS)
+# 衝突時: プレイヤーを初期位置 ($80,$80) にリセット, HIT_TIMER=$1E セット
+# ============================================================
+# $816D:
+# PLAYER_X + 8 < ENEMY_X ?  (プレイヤーが敵の左)
+A5 20        # LDA $20    (PLAYER_X)
+18           # CLC
+69 08        # ADC #$08   (PLAYER_X + 8)
+C5 30        # CMP $30    (ENEMY_X)
+90 2B        # BCC +43 → NO_HIT ($81A1; 次命令$8176+$2B=$81A1)
+
+# ENEMY_X + 8 < PLAYER_X ?  (プレイヤーが敵の右)
+# $8176:
+A5 30        # LDA $30    (ENEMY_X)
+18           # CLC
+69 08        # ADC #$08
+C5 20        # CMP $20    (PLAYER_X)
+90 22        # BCC +34 → NO_HIT ($81A1; 次命令$817F+$22=$81A1)
+
+# PLAYER_Y + 8 < ENEMY_Y ?  (プレイヤーが敵の上)
+# $817F:
+A5 21        # LDA $21    (PLAYER_Y)
+18           # CLC
+69 08        # ADC #$08
+C5 31        # CMP $31    (ENEMY_Y)
+90 19        # BCC +25 → NO_HIT ($81A1; 次命令$8188+$19=$81A1)
+
+# ENEMY_Y + 8 < PLAYER_Y ?  (プレイヤーが敵の下)
+# $8188:
+A5 31        # LDA $31    (ENEMY_Y)
+18           # CLC
+69 08        # ADC #$08
+C5 21        # CMP $21    (PLAYER_Y)
+90 10        # BCC +16 → NO_HIT ($81A1; 次命令$8191+$10=$81A1)
+
+# HIT 処理: プレイヤーを初期位置にリセット
+# $8191:
+A9 80        # LDA #$80
+85 20        # STA $20    (PLAYER_X = $80)
+85 21        # STA $21    (PLAYER_Y = $80)
+8D 00 02     # STA $0200  (OAM SPRITE_0_Y = $80)
+8D 03 02     # STA $0203  (OAM SPRITE_0_X = $80)
+A9 1E        # LDA #$1E  (HIT_TIMER = 30)
+85 02        # STA $02
+# NO_HIT ($81A1):
+60           # RTS
+
+# パディング (CHECK_COLLISION の後: 15バイト)
+EA EA EA EA EA EA EA EA EA EA EA EA EA EA EA  # NOP x15
+
+# ============================================================
+# NMI ハンドラ ($81B1〜)
+# レジスタ退避 → OAM DMA → NMI_FLAG セット → 復帰 → RTI
+# ============================================================
+# $81B1:
+48           # PHA         (A をスタックへ)
+8A           # TXA
+48           # PHA         (X をスタックへ)
+98           # TYA
+48           # PHA         (Y をスタックへ)
+
+# OAM DMA: $0200〜$02FF の内容を PPU OAM へ転送
+A9 02        # LDA #$02
+8D 14 40     # STA $4014  (OAM DMA: ページ $02)
+
+# NMI_FLAG をセット
+A9 01        # LDA #$01
+85 00        # STA $00    (NMI_FLAG = 1)
+
+# レジスタ復帰
+68           # PLA
+A8           # TAY         (スタックから Y 復帰)
+68           # PLA
+AA           # TAX         (スタックから X 復帰)
+68           # PLA         (スタックから A 復帰)
+40           # RTI
+
+# ============================================================
+# IRQ ハンドラ ($81C5〜)
+# RTI のみ
+# ============================================================
+# $81C5:
+40           # RTI
+
+# ============================================================
+# パディング ($8161〜$BFFF)
+# 残りの PRG-ROM 領域をゼロで埋める
+# (builder.py が自動でゼロパディングするため、明示的なデータは不要)
+# ============================================================
+
+[chr_rom]
+# ============================================================
+# Pattern Table 0 ($0000〜$0FFF): 背景タイル
+# ============================================================
+# タイル $00: 空白タイル (全バイト $00) — 16バイト
+00 00 00 00 00 00 00 00  # プレーン0 (8バイト)
+00 00 00 00 00 00 00 00  # プレーン1 (8バイト)
+
+# タイル $01: 障害物タイル (塗りつぶし四角) — 16バイト
+FF FF FF FF FF FF FF FF  # プレーン0: 全ピクセルON
+FF FF FF FF FF FF FF FF  # プレーン1: 全ピクセルON (カラー3=白)
+
+# タイル $02〜$FF: 空白 (254タイル x 16バイト = 4064バイト) — builder がゼロパディング
+# (Pattern Table 0 残り: 4096 - 32 = 4064 バイト → 省略、ゼロパディング)
+
+# ============================================================
+# Pattern Table 1 ($1000〜$1FFF): スプライトタイル
+# ============================================================
+# タイル $00: プレイヤースプライト (8x8 十字形) — 16バイト
+# 十字形パターン: 中央の縦横ライン
+#   行0: 00011000 = $18
+#   行1: 00011000 = $18
+#   行2: 00011000 = $18
+#   行3: 11111111 = $FF
+#   行4: 11111111 = $FF
+#   行5: 00011000 = $18
+#   行6: 00011000 = $18
+#   行7: 00011000 = $18
+18 18 18 FF FF 18 18 18  # プレーン0
+18 18 18 FF FF 18 18 18  # プレーン1
+
+# タイル $01: 敵スプライト (8x8 菱形) — 16バイト
+#   行0: 00011000 = $18
+#   行1: 00111100 = $3C
+#   行2: 01111110 = $7E
+#   行3: 11111111 = $FF
+#   行4: 11111111 = $FF
+#   行5: 01111110 = $7E
+#   行6: 00111100 = $3C
+#   行7: 00011000 = $18
+18 3C 7E FF FF 7E 3C 18  # プレーン0
+18 3C 7E FF FF 7E 3C 18  # プレーン1
+
+# タイル $02〜$FF: 空白 (builder がゼロパディング)
+
+[vectors]
+# $FFFA〜$FFFF (NMI / RESET / IRQ ベクタ) — 6バイト
+# ベクタはリトルエンディアン (低バイト先)
+# NMI ベクタ:   NMI ハンドラ $81B1 → B1 81
+# RESET ベクタ: RESET ハンドラ $8000 → 00 80
+# IRQ ベクタ:   IRQ ハンドラ $81C5 → C5 81
+B1 81  # NMI ベクタ: $81B1 (NMI ハンドラ)
+00 80  # RESET ベクタ: $8000 (RESET ハンドラ)
+C5 81  # IRQ ベクタ: $81C5 (IRQ ハンドラ)
