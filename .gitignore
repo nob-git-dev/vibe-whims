@@ -1,0 +1,16 @@
+# 開発ドキュメント（ローカルパスを含む）
+SPEC.md
+emulator/SPEC.md
+
+# Rust
+emulator/target/
+
+# Node
+emulator/frontend/node_modules/
+emulator/frontend/dist/
+emulator/frontend/src/wasm/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
