@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "wasm:build": "wasm-pack build .. --target web --out-dir frontend/src/wasm",
+    "wasm:build": "PATH=$HOME/.cargo/bin:$PATH wasm-pack build .. --target web --out-dir frontend/src/wasm",
     "build:all": "pnpm wasm:build && pnpm build"
   },
   "devDependencies": {
