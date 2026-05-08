@@ -552,7 +552,34 @@ game.nes（ファイル書き出し）
 **影響:** ファイルが 3 つになるが、各ファイルの責務が明確になる。テストは `parser.py` と `builder.py` を直接 import してテストできる。
 
 ## テスト計画
-<!-- /tdd が追記 -->
+
+### テストケース（受け入れ条件より）
+
+| 受け入れ条件 | テストケース | 結果 |
+|---|---|---|
+| `game.rom.txt` が 4 セクションを持つ | test_parser_sections_present | 未実施 |
+| 各行が正しい形式（ヘックスバイト列 # コメント） | test_parser_valid_line_format | 未実施 |
+| 変換スクリプトで同一の `game.nes` が生成される（再現性） | test_builder_deterministic | 未実施 |
+| 変換スクリプト実行で `game.nes` が生成される | test_generate_produces_nes_file（E2E） | 未実施 |
+| iNES ヘッダーマジック `4E 45 53 1A` が先頭 4 バイト | test_builder_ines_magic | 未実施 |
+| iNES バイナリが 24592 バイト | test_builder_output_size | 未実施 |
+| ベクタが prg_rom 末尾 6 バイトに正しく配置される | test_builder_vectors_placement | 未実施 |
+| prg_rom が 16384 バイトにパディングされる | test_builder_prg_padding | 未実施 |
+| chr_rom が 8192 バイトにパディングされる | test_builder_chr_padding | 未実施 |
+| 不正なヘックス値で ParseError | test_parser_invalid_hex | 未実施 |
+| 未知のセクション名で ParseError | test_parser_unknown_section | 未実施 |
+| header が 16 バイト以外で BuildError | test_builder_invalid_header_length | 未実施 |
+| header マジック不一致で BuildError | test_builder_invalid_magic | 未実施 |
+| prg_rom が 16384 バイト超で BuildError | test_builder_prg_overflow | 未実施 |
+| vectors が 6 バイト以外で BuildError | test_builder_invalid_vectors_length | 未実施 |
+| `.asm`/`.s` 書き出し・アセンブラ呼び出しが存在しない | test_no_assembler_usage（静的検査） | 未実施 |
+| subprocess を使用しない | test_no_subprocess_usage（静的検査） | 未実施 |
+
+### テスト環境
+- フレームワーク: pytest
+- 実行コマンド: `uv run pytest`
+- テストファイル: `tests/test_parser.py`, `tests/test_builder.py`
+- 分離方針: 外部ファイル I/O は generate.py のみ。domain 層はすべてインメモリでテスト可能
 
 ## レビュー結果
 <!-- /review が追記 -->
