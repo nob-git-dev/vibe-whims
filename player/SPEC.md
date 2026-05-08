@@ -121,7 +121,34 @@ player/
 <!-- /architect が追記 -->
 
 ## テスト計画
-<!-- /tdd が追記 -->
+
+### テストケース（受け入れ条件より）
+
+| 受け入れ条件 | テストケース | 種別 | 結果 |
+|---|---|---|---|
+| `public/game.nes` が存在し fetch で取得できる | game.nes が 24592 bytes で存在するか確認 | 静的 | ✅ PASS |
+| `pnpm build` が TypeScript エラーなしで完了する | `pnpm build` コマンドが exit code 0 で終了する | 静的 | ✅ PASS |
+| `dist/` に静的ファイルが生成され `dist/game.nes` が含まれる | ビルド後に dist/index.html と dist/game.nes が存在する | 静的 | ✅ PASS |
+| Canvas に 256×240px の NES 映像が描画される | index.html に width="256" height="240" の canvas 要素が存在する | 静的 | ✅ PASS |
+| キーボード入力が機能する（全キーマップ） | src/main.ts に 8 つすべてのキーマッピングが定義されている | 静的 | ✅ PASS |
+| jsnes のみを使用している | package.json の dependencies に jsnes が含まれ、他の NES エミュレータがない | 静的 | ✅ PASS |
+| `pnpm dev` でサーバーが起動する | pnpm dev コマンドが起動する（手動確認） | 手動 | 未確認 |
+| ブラウザで NES 画面が表示される | `pnpm dev` 後ブラウザで映像が描画される（手動確認） | 手動 | 未確認 |
+| スプライトが矢印キーで動く | ゲームプレイ中に移動が反映される（手動確認） | 手動 | 未確認 |
+
+### テスト環境
+
+- 静的テスト: Bash スクリプトによるファイル存在確認・`pnpm build` 実行
+- 手動テスト: `pnpm dev` でサーバー起動後、ブラウザで動作確認
+- 実行コマンド（静的）:
+  ```bash
+  # 1. ROM 存在確認
+  ls -la player/public/game.nes
+  # 2. ビルド確認
+  cd player && pnpm build
+  # 3. dist/ 確認
+  ls player/dist/game.nes player/dist/index.html
+  ```
 
 ## レビュー結果
 <!-- /review が追記 -->
