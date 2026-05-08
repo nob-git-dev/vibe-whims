@@ -1,0 +1,18 @@
+{
+  "name": "nes-emulator-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "wasm:build": "wasm-pack build .. --target web --out-dir frontend/src/wasm",
+    "build:all": "pnpm wasm:build && pnpm build"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "vite": "^5.4.14",
+    "vite-plugin-wasm": "^3.3.0",
+    "vite-plugin-top-level-await": "^1.4.4"
+  }
+}

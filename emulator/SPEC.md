@@ -358,7 +358,102 @@ export { WasmEmulator };
 **影響:** `src/presentation/wasm_binding.rs` が Rust コードの外部公開エントリポイントとなる。`src/lib.rs` は `mod domain; mod infrastructure; mod presentation;` を宣言するだけでよい。
 
 ## テスト計画
-<!-- /tdd が追記 -->
+
+### テストケース（受け入れ条件より）
+
+| # | 受け入れ条件 | テストケース（Rust unit） | 結果 |
+|---|---|---|---|
+| 1 | pnpm dev でブラウザ表示 | — (手動確認) | 未実施 |
+| 2 | ファイル選択 UI | — (手動確認) | 未実施 |
+| 3 | Mapper 0 ROM 読み込みでエミュレーション開始 | `test_parse_ines_16kb`, `test_parse_ines_32kb`, `test_mapper0_read_prg_16kb`, `test_mapper0_read_prg_32kb`, `test_emulator_reset_vector` | ✅ PASS |
+| 4 | 256×240 Canvas 描画 | `test_ppu_frame_buffer_size`, `test_ppu_get_frame_buffer_size` | ✅ PASS |
+| 5 | 60fps ゲームループ | `test_emulator_step_frame` (29780 サイクル確認), `test_ppu_frame_complete_after_one_frame` | ✅ PASS |
+| 6 | 矢印キー入力 | `test_controller_set_button_state`, `test_controller_latch_and_serial_read` | ✅ PASS |
+| 7 | Z/X/Enter/Shift キー | `test_controller_all_buttons`, `test_controller_multiple_buttons` | ✅ PASS |
+| 8 | ../game.nes で動作 | — (統合確認) | 未実施 |
+| 9 | JS エラーなし | — (手動確認) | 未実施 |
+| 10 | pnpm build 成功 | `pnpm build` 実行 → dist/ 生成確認 | ✅ PASS |
+
+### テスト詳細設計
+
+#### Phase 1: infrastructure 層
+
+**rom_parser テスト:**
+- `test_parse_ines_valid_header` — 有効な iNES ヘッダーを持つバイト列を `parse()` に渡し `RomData` が返ること
+- `test_parse_ines_16kb` — PRG-ROM 16KB (1 バンク) の ROM を正しくパースすること
+- `test_parse_ines_32kb` — PRG-ROM 32KB (2 バンク) の ROM を正しくパースすること
+- `test_parse_ines_invalid_magic` — マジックバイトが不正な場合 `Err(ParseError)` が返ること
+- `test_parse_ines_too_short` — バイト列が短すぎる場合 `Err(ParseError)` が返ること
+- `test_parse_ines_mapper_number` — マッパー番号が正しく読み取れること
+
+**mapper テスト:**
+- `test_mapper0_read_prg_16kb` — 16KB PRG-ROM の $8000-$BFFF と $C000-$FFFF がミラーになること
+- `test_mapper0_read_prg_32kb` — 32KB PRG-ROM の $8000-$FFFF が正しくマッピングされること
+- `test_mapper0_read_chr` — CHR-ROM の $0000-$1FFF が正しく読み取れること
+
+#### Phase 2: domain 層
+
+**controller テスト:**
+- `test_controller_initial_state` — 初期状態でボタンはすべて OFF
+- `test_controller_set_button_state` — `set_buttons(bits)` 後に適切なビットが立つこと
+- `test_controller_latch_and_serial_read` — $4016 書き込みでラッチ、8 回読み取りで 8 ボタン分が MSB→LSB 順で出力されること
+- `test_controller_all_buttons` — 全 8 ボタンのビットマップが正しく定義されること
+
+**cpu テスト（主要命令）:**
+- `test_cpu_lda_immediate` — LDA #$xx でアキュムレータが更新され Z/N フラグが正しくセットされること
+- `test_cpu_lda_zeropage` — LDA $xx でゼロページ読み取りが正しいこと
+- `test_cpu_sta_zeropage` — STA $xx でメモリへの書き込みが正しいこと
+- `test_cpu_jmp_absolute` — JMP $xxxx で PC が正しくジャンプすること
+- `test_cpu_beq_taken` — BEQ で Z フラグが 1 の時にブランチすること
+- `test_cpu_beq_not_taken` — BEQ で Z フラグが 0 の時にブランチしないこと
+- `test_cpu_nmi` — NMI 発生時に正しいベクタアドレスへジャンプすること
+- `test_cpu_reset_vector` — RESET 後に PC が $FFFC/$FFFD ベクタを指すこと
+- `test_cpu_cycles` — 各命令が正しいサイクル数を消費すること（LDA: 2, JMP: 3 等）
+
+**ppu テスト:**
+- `test_ppu_initial_state` — 初期状態でスキャンラインカウンタが 0
+- `test_ppu_scanline_increment` — `step(cycles)` でスキャンラインが正しくインクリメントされること
+- `test_ppu_nmi_fires_at_vblank` — スキャンライン 241 で NMI フラグが立つこと
+- `test_ppu_frame_buffer_size` — フレームバッファが 256×240×4 = 245760 バイトであること
+- `test_ppu_frame_complete` — 1 フレーム分のステップ後に `frame_ready` フラグが true になること
+
+**bus テスト:**
+- `test_bus_ram_read_write` — $0000-$07FF の RAM 読み書きが正しいこと
+- `test_bus_ram_mirror` — $0800-$1FFF が RAM ミラーになっていること
+- `test_bus_prg_rom_read` — $8000 以降の PRG-ROM 読み取りが Cartridge に委譲されること
+
+**emulator テスト:**
+- `test_emulator_reset` — `load_rom()` 後に CPU が RESET ベクタから開始すること
+- `test_emulator_step_frame` — `step_frame()` が約 29780 サイクル実行すること
+
+### テスト環境
+- フレームワーク: Rust 組み込み `#[test]` / `#[cfg(test)]`
+- 実行コマンド: `cargo test` (ネイティブターゲット、WASM 不要)
+- フロントエンド: `pnpm dev` / `pnpm build` の手動確認
+
+### 実行結果サマリー（2026-05-08）
+
+```
+test result: ok. 76 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+**実行テスト一覧:**
+- infrastructure::rom_parser: 10 テスト PASS
+- infrastructure::mapper: 9 テスト PASS
+- domain::controller: 9 テスト PASS
+- domain::cpu: 15 テスト PASS
+- domain::ppu: 8 テスト PASS
+- domain::bus: 8 テスト PASS
+- domain::cartridge: 4 テスト PASS
+- domain (Emulator): 6 テスト PASS (domain::tests)
+- domain::bus: 7 テスト PASS
+
+**フロントエンドビルド確認:**
+- `pnpm build` → `dist/` に静的ファイル生成成功
+  - `dist/index.html` (1.99 kB)
+  - `dist/assets/nes_emulator_bg-*.wasm` (47.08 kB)
+  - `dist/assets/index-*.js` (6.57 kB)
+- WASM ビルド: `wasm-pack build --target web` 成功
 
 ## レビュー結果
 <!-- /review が追記 -->

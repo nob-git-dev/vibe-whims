@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NES Emulator</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        background: #1a1a2e;
+        color: #eee;
+        font-family: monospace;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-height: 100vh;
+        padding: 20px;
+      }
+
+      h1 {
+        margin-bottom: 16px;
+        font-size: 1.4rem;
+        color: #a0cfff;
+      }
+
+      #controls {
+        margin-bottom: 12px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+
+      #rom-input {
+        color: #eee;
+        background: #16213e;
+        border: 1px solid #0f3460;
+        padding: 6px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      #status {
+        font-size: 0.85rem;
+        color: #aaa;
+      }
+
+      #canvas-container {
+        border: 2px solid #0f3460;
+        background: #000;
+      }
+
+      canvas {
+        display: block;
+        /* CSS 2倍スケール（NES 解像度は 256×240、表示は 512×480） */
+        width: 512px;
+        height: 480px;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+      }
+
+      #key-guide {
+        margin-top: 16px;
+        font-size: 0.75rem;
+        color: #888;
+        text-align: center;
+        line-height: 1.8;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>NES Emulator</h1>
+
+    <div id="controls">
+      <input type="file" id="rom-input" accept=".nes" />
+      <span id="status">ROM を選択してください</span>
+    </div>
+
+    <div id="canvas-container">
+      <canvas id="nes-canvas" width="256" height="240"></canvas>
+    </div>
+
+    <div id="key-guide">
+      矢印キー: 十字キー ／ Z: B ／ X: A ／ Enter: Start ／ Shift: Select
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
