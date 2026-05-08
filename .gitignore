@@ -1,6 +1,15 @@
 # 開発ドキュメント（ローカルパスを含む）
 SPEC.md
 emulator/SPEC.md
+player/SPEC.md
+
+# 著作権 ROM（公開禁止）
+mariokart86-cfcb276.nes
+thewit.nes
+
+# macOS
+.DS_Store
+**/.DS_Store
 
 # Rust
 emulator/target/
@@ -12,5 +21,13 @@ emulator/frontend/src/wasm/
 
 # Python
 __pycache__/
+**/__pycache__/
 *.pyc
 .venv/
+
+# Player
+player/node_modules/
+player/dist/
+
+# Tools
+tools/__pycache__/
