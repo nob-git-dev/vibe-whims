@@ -1,10 +1,10 @@
-# NES Binary Experiment
+# vibe-whims — NES Binary Experiment
 
-An experiment in AI-driven NES ROM generation and emulation.
+Experimental tools & random prototypes born from pure Vibe Coding whims. No plans, just vibes. Feel free to fork, break, or get inspired.
 
-## Projects
+---
 
-### 🎮 NES Emulator (Rust → WebAssembly)
+## 🎮 NES Emulator (Rust → WebAssembly)
 
 A NES emulator that runs in the browser via WebAssembly.
 
@@ -15,7 +15,7 @@ A NES emulator that runs in the browser via WebAssembly.
 - Mapper 0 (NROM) support
 - Keyboard input → NES gamepad mapping
 
-#### Controls
+### Controls
 
 | Key | NES Button |
 |-----|-----------|
@@ -25,7 +25,7 @@ A NES emulator that runs in the browser via WebAssembly.
 | Shift | Select |
 | Enter | Start |
 
-#### Local Development
+### Local Development
 
 ```bash
 cd emulator/frontend
@@ -37,14 +37,12 @@ pnpm run wasm:build
 pnpm dev
 ```
 
-### 🔧 NES ROM Generator (Python)
+---
+
+## 🔧 NES ROM Generator (Python)
 
 Generates `.nes` ROM files directly from annotated hex dumps (`game.rom.txt`), without an assembler or compiler.
 
 ```bash
 uv run generate.py
 ```
-
----
-
-*Vibe Coding experiment — no plans, just vibes.*
