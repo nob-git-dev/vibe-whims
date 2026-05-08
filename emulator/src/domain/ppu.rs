@@ -419,10 +419,10 @@ impl Ppu {
     }
 
     /// 背景ピクセルのパレットインデックスを取得する
-    fn get_bg_pixel(&self, x: usize, _y: usize) -> u8 {
+    fn get_bg_pixel(&self, x: usize, y: usize) -> u8 {
         // 簡易実装: ネームテーブル 0 を使用
         let tile_x = (x + self.scroll_x as usize) / 8 % 32;
-        let tile_y = (self.scanline as usize + self.scroll_y as usize) / 8 % 30;
+        let tile_y = (y + self.scroll_y as usize) / 8 % 30;
         let tile_idx = tile_y * 32 + tile_x;
 
         if tile_idx >= self.vram.len() {
@@ -431,7 +431,7 @@ impl Ppu {
 
         let tile_id = self.vram[tile_idx] as usize;
         let fine_x = (x + self.scroll_x as usize) % 8;
-        let fine_y = (self.scanline as usize + self.scroll_y as usize) % 8;
+        let fine_y = (y + self.scroll_y as usize) % 8;
 
         // CHR データからパターンを取得
         let bg_table = if self.ctrl & ctrl_flags::BG_TABLE != 0 { 0x1000 } else { 0x0000 };
@@ -465,7 +465,7 @@ impl Ppu {
 
     /// スプライトピクセルのパレットインデックスを取得する
     /// 返り値: (パレットインデックス, 後ろ優先フラグ)
-    fn get_sprite_pixel(&self, x: usize, _y: usize) -> (u8, bool) {
+    fn get_sprite_pixel(&self, x: usize, y: usize) -> (u8, bool) {
         let sprite_size = if self.ctrl & ctrl_flags::SPRITE_SIZE != 0 { 16 } else { 8 };
         let sprite_table = if self.ctrl & ctrl_flags::SPRITE_TABLE != 0 { 0x1000 } else { 0x0000 };
 
@@ -475,7 +475,7 @@ impl Ppu {
             let tile_id = self.oam[i * 4 + 1] as usize;
             let attr = self.oam[i * 4 + 2];
 
-            let y = self.scanline as i32;
+            let y = y as i32;
 
             if y < sprite_y || y >= sprite_y + sprite_size {
                 continue;

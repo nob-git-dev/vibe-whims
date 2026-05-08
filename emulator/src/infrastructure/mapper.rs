@@ -59,12 +59,10 @@ impl Mapper for Mapper0 {
             } else {
                 0
             }
+        } else if offset < self.chr_ram.len() {
+            self.chr_ram[offset]
         } else {
-            if offset < self.chr_ram.len() {
-                self.chr_ram[offset]
-            } else {
-                0
-            }
+            0
         }
     }
 

@@ -456,7 +456,110 @@ test result: ok. 76 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 - WASM ビルド: `wasm-pack build --target web` 成功
 
 ## レビュー結果
-<!-- /review が追記 -->
+
+### 判定: 条件付き承認（Should 指摘を次フェーズ前に対処推奨）
+
+レビュー日: 2026-05-08
+全 76 テスト PASS 確認済み
+
+---
+
+### 固定要件の遵守確認
+
+- [x] 実装言語: Rust + wasm-pack（変更なし）
+- [x] フロントエンド: TypeScript 必須・pnpm 使用（npm 使用なし）
+- [x] ビルドツール: Vite + vite-plugin-wasm（wasm-pack は `pnpm wasm:build` で呼び出し）
+- [x] 3層アーキテクチャ: `src/domain/` / `src/infrastructure/` / `src/presentation/` が存在する
+- [x] 依存方向: presentation → domain → infrastructure（逆依存なし）
+  - `presentation/wasm_binding.rs` は `crate::domain::Emulator` のみを import
+  - `domain/cartridge.rs` は `infrastructure/mapper.rs` を import（仕様通り）
+  - `domain/` は `presentation/` を import しない
+- [x] Canvas サイズ: `width="256" height="240"` をネイティブ解像度として保持し、CSS で 512×480 に拡大
+- [x] wasm-bindgen を domain 層に持ち込まず presentation ラッパーに限定（ADR-4 準拠）
+
+---
+
+### 受け入れ条件との整合性
+
+| 受け入れ条件 | 評価 | 備考 |
+|---|---|---|
+| pnpm dev でブラウザ表示 | ○ | Vite 設定・index.html ともに問題なし |
+| ファイル選択 UI | ○ | `romLoader.ts` で FileReader を正しく使用 |
+| Mapper 0 ROM 読み込み | ○ | `test_emulator_reset_vector` で RESET ベクタ確認済み |
+| 256×240 Canvas 描画 | ○ | `frame_buffer` サイズ 245760 bytes 確認済み |
+| 60fps ゲームループ | △ | `requestAnimationFrame` のみ。120Hz 環境では 2倍速（ADR-3 既知問題） |
+| 矢印キー入力 | ○ | `inputHandler.ts` で `ArrowUp/Down/Left/Right` をマッピング |
+| Z/X/Enter/Shift キー | ○ | `KEY_MAP` に定義済み（ShiftLeft/ShiftRight 両方対応） |
+| game.nes 動作 | 未確認（統合テスト必要） | — |
+| JS エラーなし | 未確認（手動確認必要） | — |
+| pnpm build 成功 | ○ | dist/ 生成済み（WASM 47KB, JS 6.5KB） |
+
+---
+
+### 指摘事項
+
+| 重要度 | 観点 | 場所 | 内容 | 改善案 |
+|---|---|---|---|---|
+| Should | PPU 正確性 | `ppu.rs` `mirror_vram_addr()` | ミラーリングモードが水平固定。`Ppu` が `RomData.mirroring` を参照せず、垂直ミラーリングの ROM では背景がずれる可能性 | `Ppu` に `mirroring: Mirroring` フィールドを追加し、`Bus::load_cartridge()` で `ppu.mirroring` を設定する |
+| Should | PPU 正確性 | `ppu.rs` `get_bg_pixel()` | fine_y の計算で `_y` 引数を使わず `self.scanline` を直接参照している。引数 `y` と `self.scanline` の不一致リスク（将来的なリファクタ時に混乱しやすい） | 引数 `_y: usize` を `y: usize` に変え、`self.scanline as usize` の代わりに `y` を使用する |
+| Should | PPU 正確性 | `ppu.rs` `get_sprite_pixel()` | `_y` 引数（呼び出し元から渡された `y`）を使わず `self.scanline` を参照。`get_bg_pixel()` と同じ問題 | 同上 |
+| Should | コントローラー仕様 | `controller.rs` `read()` | NES 実機では 8 回読み取り後（9回目以降）は `1` を返すが、本実装では `shift_count >= 8` を判定している。ラッチ前（`shift_count` が初期化されていない状態）のエッジケースは問題ないが、`strobe` ON 中の `shift_count` リセットが `write()` にしかなく `set_buttons()` 変更時に `shift_count` がリセットされない点は現状問題なし（ラッチが必要のため）。動作は仕様準拠 | 現状で仕様準拠。変更不要 |
+| Should | 安全性 | `domain/mod.rs` `step_frame()` | `Cpu.stall` フィールドが存在するが `step_frame()` では `bus.dma_stall` のみを処理し `cpu.stall` は `cpu.step()` 内でのみ消費される。OAM DMA の 513 サイクルは `bus.dma_stall` で管理されており二重管理になっている。`Cpu.stall` と `Bus.dma_stall` の役割が重複・混在しているため将来バグの温床になりうる | `Cpu.stall` を除去するか、DMA スタール処理を `Cpu.stall` に一本化する |
+| Should | パフォーマンス | `ppu.rs` `get_frame_buffer()` | 毎フレーム `frame_buffer.to_vec()` で 245760 bytes をヒープコピーしている（ADR-1 既知事項）。現状では問題ないが、プロファイリングで遅い場合は `Vec<u8>` を使い回す設計に変更する余地あり | 現状許容（ADR-1 の判断通り）。将来のプロファイリング候補として記録 |
+| Could | 可読性 | `cpu.rs` `execute()` | 1 行に複数処理を詰め込んだ match アーム（例: SLO, RLA, SRE, RRA 等の非公式命令）は行が長く読みにくい。ただし機能的には正確であり、エミュレータ実装の慣用パターン | 非公式命令を別メソッドに抽出してもよい（必須ではない） |
+| Could | 可読性 | `mapper.rs` `read_chr()` | `if !self.chr_rom.is_empty() { ... } else { if offset < ... }` は `else if` に書き直せる小さな改善余地 | `} else if offset < self.chr_ram.len() {` にまとめる |
+| Could | テスト | `domain/mod.rs` tests | `make_test_rom` が `#[cfg(test)]` で `infrastructure::rom_parser` に定義されているが `domain::tests` からも使われており、テスト用ユーティリティへの cross-crate 依存が存在する。現状は同一クレート内なので問題なし | 変更不要 |
+
+---
+
+### 6502 CPU 実装の正確性評価
+
+- **フラグ処理**: N/Z/C/V フラグはすべての命令で正しく処理されている。特に ADC のオーバーフロー検出 `!(a ^ v) & (a ^ result) & 0x80 != 0` は標準的な正しい実装。
+- **SBC**: `self.adc(!val)` による実装は 6502 の定義通り（SBC は ADC(~operand)）。
+- **BRK**: PC+1 をプッシュする点（仕様通り）を確認。
+- **RTI**: B フラグをクリアしてステータスを復元する点を確認。
+- **JMP Indirect バグ**: `read16_page_bug()` でページ境界をまたぐバグを正しく再現。
+- **ブランチサイクル**: 分岐なし=2、分岐あり=3、ページ境界越え=4 を正しく実装。
+- **非公式命令**: LAX, SAX, DCP, ISC, SLO, RLA, SRE, RRA を網羅。KIL 系は NOP 扱い（許容範囲）。
+
+### NMI タイミング評価
+
+- VBlank 開始はスキャンライン 241, dot 1 で `status |= VBLANK` と `nmi_pending = true` を設定。NES 仕様通り。
+- `step_frame()` 内で PPU ステップ後に `nmi_pending` をチェックし `cpu.nmi()` を即時呼び出す構造は正確。
+- NMI ベクタ $FFFA/$FFFB からの PC 取得・I フラグセット・スタックプッシュが仕様通り。
+
+### Mapper 0 評価
+
+- 16KB ROM: `offset % 16384` によるミラー処理（$C000-$FFFF → $8000-$BFFF）が正確。
+- 32KB ROM: `offset % self.prg_rom.len()` は 32768 で割るため $8000-$FFFF をフルマップ。正確。
+- CHR-ROM ゼロの場合 CHR-RAM にフォールバックする実装あり。
+
+### コントローラー $4016 シリアル読み取り評価
+
+- ストローブ ON 中: A ボタンを連続返却（NES 仕様通り）
+- ストローブ OFF 後: `shift_count` を 0 から順に増加させ `(shift_register >> shift_count) & 0x01` で A→B→Select→Start→Up→Down→Left→Right の順（LSB 優先、NES 標準通り）
+- 8 回読み取り後: `1` を返す（NES 実機動作通り）
+- ラッチ後のボタン状態変更は読み取りに影響しない（`test_controller_relatch_after_button_change` で確認済み）
+
+### アーキテクチャ評価
+
+3 層分離は適切に実装されている:
+- `domain/` は `wasm-bindgen` に依存しない
+- `presentation/wasm_binding.rs` のみが `wasm_bindgen::prelude::*` を import
+- `infrastructure/` は ROM パースとマッパーに限定され、外部 I/O に依存しない
+
+### unsafe コードの確認
+
+コードベース全体に `unsafe` ブロックなし（Rust の型安全性を最大限活用）。パニック可能性は以下に限定:
+- `frame_buffer[idx]` へのアクセス（`x < 256 && y < 240` のガード済み）
+- `vram[mirrored]` / `palette[idx]` のインデックスアクセス（境界チェック済み）
+- DOM 要素の `as HTMLCanvasElement` キャスト（null チェックあり）
+
+---
+
+### 総合評価
+
+コードの完成度は高く、NES エミュレーターとして最低限動作するレベルを十分に満たしている。Must 指摘（固定要件違反・明確なバグ）はゼロ。Should 指摘のうち「PPU ミラーリングモード固定」は Mapper 0 の NROM ROM の多くが水平ミラーリングを採用するため実用上の影響は限定的だが、垂直ミラーリングの ROM（例: `game.nes` が垂直ミラーを使う場合）で背景描画が崩れる可能性がある。`../game.nes` の mirroring 設定に依存して問題が顕在化するため、次フェーズ（デプロイ/統合テスト）前に確認することを推奨する。
 
 ## デプロイ計画
 <!-- /deploy が追記 -->
