@@ -29,41 +29,52 @@ async function main(): Promise<void> {
   const inputHandler = new InputHandler();
   let gameLoop: GameLoop | null = null;
 
+  // ROM をロードしてゲームループを開始する共通処理
+  function loadRom(data: Uint8Array, filename: string): void {
+    try {
+      gameLoop?.stop();
+      emulator.load_rom(data);
+      status.textContent = `▶ ${filename}`;
+      status.style.color = "#7fff7f";
+      gameLoop = new GameLoop(emulator, renderer);
+      gameLoop.start();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      status.textContent = `エラー: ${msg}`;
+      status.style.color = "#ff7f7f";
+      console.error("ROM ロードエラー:", err);
+    }
+  }
+
   // 入力ハンドラーにエミュレーターをアタッチ
   inputHandler.attach(emulator);
   inputHandler.register();
 
-  // ROM ローダーをセットアップ
+  // ファイル選択 ROM ローダー
   setupRomLoader(
     romInput,
-    (data: Uint8Array, filename: string) => {
-      try {
-        // 実行中のゲームループを停止
-        gameLoop?.stop();
-
-        // ROM をロード
-        emulator.load_rom(data);
-        status.textContent = `実行中: ${filename}`;
-        status.style.color = "#7fff7f";
-
-        // ゲームループを開始
-        gameLoop = new GameLoop(emulator, renderer);
-        gameLoop.start();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        status.textContent = `エラー: ${msg}`;
-        status.style.color = "#ff7f7f";
-        console.error("ROM ロードエラー:", err);
-      }
-    },
-    (errMsg: string) => {
+    (data, filename) => loadRom(data, filename),
+    (errMsg) => {
       status.textContent = errMsg;
       status.style.color = "#ff7f7f";
       console.error(errMsg);
     }
   );
 
-  status.textContent = "WASM ロード完了 - ROM を選択してください";
+  // デフォルト ROM を自動ロード（public/game.nes）
+  status.textContent = "Loading...";
+  try {
+    const url = `${import.meta.env.BASE_URL}game.nes`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = await res.arrayBuffer();
+    loadRom(new Uint8Array(buf), "game.nes");
+  } catch (err) {
+    console.warn("デフォルト ROM のロードに失敗:", err);
+    status.textContent = "ROM を選択してください";
+    status.style.color = "#aaa";
+  }
+
   console.log("NES エミュレーター初期化完了");
 }
 

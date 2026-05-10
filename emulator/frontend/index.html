@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NES Emulator</title>
+    <title>NES Binary Experiment — Browser Emulator</title>
     <style>
       * {
         box-sizing: border-box;
@@ -73,11 +73,11 @@
     </style>
   </head>
   <body>
-    <h1>NES Emulator</h1>
+    <h1>NES Binary Experiment</h1>
 
     <div id="controls">
-      <input type="file" id="rom-input" accept=".nes" />
-      <span id="status">ROM を選択してください</span>
+      <input type="file" id="rom-input" accept=".nes" title="別の .nes ROM を読み込む" />
+      <span id="status">Loading...</span>
     </div>
 
     <div id="canvas-container">
