@@ -1,0 +1,37 @@
+// CompositionRoot のスケッチ（ADR-2）。
+//
+// このファイルは .swift.txt 拡張子であり SPM ビルド対象外（実 @main アプリ・Info.plist・
+// 署名は /deploy フェーズで Xcode app target として構築する）。
+// ここでは「Composition Root を presentation 起動部に 1 箇所だけ置き、infrastructure の
+// 具体 Adapter を生成して domain の TranscriptionService に port として注入する」結線方針を示す。
+//
+// import AppKit / SwiftUI       ← presentation は OS/UI に依存してよい
+// import SpeechTapDomain
+// import SpeechTapInfrastructure
+//
+// @main
+// struct MenuBarApp {
+//     static func main() {
+//         // 設定の外部化: config から locale / outputPath を読む（直書きしない）。
+//         let config = try! ConfigLoader.load(from: configPath())
+//
+//         // Composition Root: 具体 Adapter を生成（ここだけが infrastructure を知る）。
+//         let audio: AudioSource          = ProcessTapAudioSource()
+//         let recognizer: SpeechRecognizer = SpeechAnalyzerAdapter()
+//         let permission: PermissionGate   = AudioCapturePermission()
+//         let sink: TranscriptSink         = FileTranscriptSink(outputPath: config.outputPath)
+//         let apps: AppEnumerator          = RunningAppProvider()
+//
+//         // domain に port を注入（domain は具体型を知らない＝逆依存なし）。
+//         let service = TranscriptionService(
+//             audioSource: audio,
+//             recognizer: recognizer,
+//             permissionGate: permission,
+//             sink: sink,
+//             locale: config.locale
+//         )
+//
+//         // ViewModel が service の状態を購読し、MenuBarController / *View に橋渡しする。
+//         // ... NSApplication のセットアップ・メニューバー常駐 ...
+//     }
+// }
