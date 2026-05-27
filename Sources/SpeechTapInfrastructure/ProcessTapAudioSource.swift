@@ -30,8 +30,3 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
         // TODO: IOProc 停止・Aggregate Device / Tap の破棄・リソース解放。
     }
 }
-
-enum NotImplemented: Error {
-    case processTap
-    case speechAnalyzer
-}

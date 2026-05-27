@@ -22,20 +22,29 @@ final class FakePermissionGate: PermissionGate, @unchecked Sendable {
 }
 
 /// テストが制御する AsyncStream を流す AudioSource。
-/// start で AudioFrame ストリームを返し、stop 呼び出しを記録する。
+/// start で AudioFrame ストリームを返し、start / stop 呼び出しを記録する。
 final class FakeAudioSource: AudioSource, @unchecked Sendable {
     private let frames: [AudioFrame]
     let shouldThrow: Bool
-    private(set) var stopCalled = false
+    private let lock = NSLock()
+    private var _startCount = 0
+    private var _stopCalled = false
 
     init(frames: [AudioFrame] = [], shouldThrow: Bool = false) {
         self.frames = frames
         self.shouldThrow = shouldThrow
     }
 
+    /// start が呼ばれた回数（denied 時に「音声取得を開始していない」を直接検証するため）。
+    var startCount: Int { lock.lock(); defer { lock.unlock() }; return _startCount }
+    /// start が一度でも呼ばれたか。
+    var startCalled: Bool { startCount > 0 }
+    var stopCalled: Bool { lock.lock(); defer { lock.unlock() }; return _stopCalled }
+
     struct StartError: Error {}
 
     func start(app: AppId) async throws -> AsyncStream<AudioFrame> {
+        lock.withLock { _startCount += 1 }
         if shouldThrow { throw StartError() }
         let frames = self.frames
         return AsyncStream { continuation in
@@ -44,7 +53,7 @@ final class FakeAudioSource: AudioSource, @unchecked Sendable {
         }
     }
 
-    func stop() async { stopCalled = true }
+    func stop() async { lock.withLock { _stopCalled = true } }
 }
 
 /// 入力音声を無視し、テストが指定した RecognitionResult 列をそのまま流す SpeechRecognizer。
@@ -56,9 +65,9 @@ final class FakeSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
         self.results = results
     }
 
-    func transcribe(_ audio: AsyncStream<AudioFrame>, locale: Locale) -> AsyncStream<RecognitionResult> {
+    func transcribe(_ audio: AsyncStream<AudioFrame>, locale: Locale) -> AsyncThrowingStream<RecognitionResult, Error> {
         let results = self.results
-        return AsyncStream { continuation in
+        return AsyncThrowingStream { continuation in
             Task {
                 // 入力ストリームを消費（実装の流れに合わせる）。
                 for await _ in audio {}
@@ -67,15 +76,70 @@ final class FakeSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
             }
         }
     }
+
+    func finalize() async {}
+}
+
+/// 実機の SpeechAnalyzer を模し、stop（finalize）時に**初めて**最後の finalized を流す SpeechRecognizer。
+/// stop 呼び出し前にはまだ流していない finalized が、finalize() 後に遅れて届くことを再現する。
+/// Must-1「停止時 finalize で最後の確定まで取りこぼさない」検証用。
+final class DeferredFinalizeRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: AsyncThrowingStream<RecognitionResult, Error>.Continuation?
+    private let immediate: [RecognitionResult]
+    private let onFinalize: [RecognitionResult]
+
+    /// - immediate: transcribe 直後に流す結果（running 中に届くもの）。
+    /// - onFinalize: finalize() が呼ばれて初めて流す結果（停止時に取りこぼしてはならないもの）。
+    init(immediate: [RecognitionResult] = [], onFinalize: [RecognitionResult]) {
+        self.immediate = immediate
+        self.onFinalize = onFinalize
+    }
+
+    func transcribe(_ audio: AsyncStream<AudioFrame>, locale: Locale) -> AsyncThrowingStream<RecognitionResult, Error> {
+        let immediate = self.immediate
+        return AsyncThrowingStream { continuation in
+            self.lock.withLock { self.continuation = continuation }
+            for r in immediate { continuation.yield(r) }
+            // finalize() が呼ばれるまでストリームは終端しない（running 継続を模す）。
+        }
+    }
+
+    func finalize() async {
+        let c = lock.withLock { continuation }
+        for r in onFinalize { c?.yield(r) }
+        c?.finish()
+    }
+}
+
+/// 認識/タップの異常終了を模す SpeechRecognizer。
+/// transcribe のストリームが error で終端する（finalize ではなく障害）。error 状態遷移の検証用。
+final class FailingSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
+    struct StreamError: Error {}
+    private let before: [RecognitionResult]
+
+    init(before: [RecognitionResult] = []) {
+        self.before = before
+    }
+
+    func transcribe(_ audio: AsyncStream<AudioFrame>, locale: Locale) -> AsyncThrowingStream<RecognitionResult, Error> {
+        let before = self.before
+        return AsyncThrowingStream { continuation in
+            for r in before { continuation.yield(r) }
+            continuation.finish(throwing: StreamError())
+        }
+    }
+
+    func finalize() async {}
 }
 
 /// 外部から手動で結果を流せる SpeechRecognizer（停止後到着シナリオ用）。
 final class ManualSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: AsyncStream<RecognitionResult>.Continuation?
+    private var continuation: AsyncThrowingStream<RecognitionResult, Error>.Continuation?
 
-    func transcribe(_ audio: AsyncStream<AudioFrame>, locale: Locale) -> AsyncStream<RecognitionResult> {
-        AsyncStream { continuation in
+    func transcribe(_ audio: AsyncStream<AudioFrame>, locale: Locale) -> AsyncThrowingStream<RecognitionResult, Error> {
+        AsyncThrowingStream { continuation in
             lock.lock()
             self.continuation = continuation
             lock.unlock()
@@ -94,6 +158,10 @@ final class ManualSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
         let c = continuation
         lock.unlock()
         c?.finish()
+    }
+
+    func finalize() async {
+        // 手動制御のため finalize では何も流さない（テスト側で emit/finish する）。
     }
 }
 

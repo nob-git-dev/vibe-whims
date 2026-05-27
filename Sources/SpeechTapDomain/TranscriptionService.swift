@@ -80,10 +80,20 @@ public actor TranscriptionService {
             transition(to: .running(app))
 
             let results = recognizer.transcribe(audioStream, locale: locale)
-            recognitionTask = Task { [weak self] in
-                for await result in results {
-                    guard let self else { return }
-                    await self.handle(result: result, generation: myGeneration)
+            // recognitionTask は self が所有し、stop()/failed() で nil 化して破棄する。
+            // actor の self を強参照しても、タスク完了または nil 化で循環は解消されるため weak にしない
+            // （weak だとストリーム消費が静かに止まる挙動が分かりにくいため、意図を明確化して強参照とする）。
+            recognitionTask = Task {
+                do {
+                    for try await result in results {
+                        await self.handle(result: result, generation: myGeneration)
+                    }
+                } catch is CancellationError {
+                    // 正常な停止に伴うキャンセル。error 扱いしない。
+                } catch {
+                    // 認識/タップのストリームが異常終了した（finalize ではなく障害）。
+                    // running → error（リソース解放）。状態遷移図 running → error を担保する。
+                    await self.failed("recognition stream failed: \(error)", generation: myGeneration)
                 }
             }
         } catch {
@@ -91,44 +101,104 @@ public actor TranscriptionService {
         }
     }
 
-    /// 認識結果の取り込み。停止後（世代不一致）に到着した結果は破棄し、保存・追記しない。
+    /// 認識結果の取り込み。停止後（世代不一致 / stopped 以降）に到着した結果は破棄し、保存・追記しない。
+    /// running 中だけでなく stopping 中（finalize による最後の確定の取り込み）も受け付ける。
     private func handle(result: RecognitionResult, generation resultGeneration: Int) async {
-        // running 世代でなければ（= 停止後の遅延バッファ）破棄する。
-        guard case .running = state, resultGeneration == generation else {
+        // 世代不一致（= 停止後の遅延バッファ）や stopped/error 後は破棄する。
+        guard resultGeneration == generation else { return }
+        switch state {
+        case .running, .stopping:
+            break
+        default:
             return
         }
         store.ingest(result)
         if result.isFinal {
             // finalized のみ保存（取りこぼし防止・volatile は保存しない）。
-            try? await sink.append(TranscriptSegment(text: result.text, range: result.range))
+            // 保存失敗は黙殺しない: 失敗時は error 状態へ遷移する。
+            do {
+                try await sink.append(TranscriptSegment(text: result.text, range: result.range))
+            } catch {
+                await failed("transcript save failed: \(error)", generation: resultGeneration)
+            }
         }
     }
 
-    /// 停止。running → stopping →（finalize+flush）→ stopped。
-    /// 最後の finalized まで flush してから停止する。停止後の結果は破棄される（世代更新）。
+    /// 停止。running → stopping →（finalize → 残り finalized 取り込み → flush）→ stopped。
+    /// ADR-3: 認識器を finalize して最後の確定結果まで取りこぼさず flush してから停止する。
+    /// 即時 cancel で打ち切らない（finalize で正規に流す確定結果を取りこぼさないため）。
     public func stop() async {
         guard case .running(let app) = state else { return }
         transition(to: .stopping(app))
 
-        // これ以降に到着する結果を破棄するため世代を進める。
-        generation += 1
+        // 1. 認識器を finalize: 残りの volatile を確定へ昇格し、未配信 finalized を流し切ってストリームを終端する。
+        //    （port 契約: finalize() はストリームを終端する。これにより 2 の待機が完了する。）
+        await recognizer.finalize()
 
-        await audioSource.stop()
-        recognitionTask?.cancel()
+        // 2. finalize で遅れて届く最後の finalized まで全て handle されるのを待つ
+        //    （stopping 中・同一世代なので append される）。
+        //    契約に反してストリームが終端しない実装に備え、有界に待ってからキャンセルで打ち切る
+        //    （finalize 済みの結果は既に handle 済みのため取りこぼさない）。
+        if let task = recognitionTask {
+            await drain(task)
+        }
         recognitionTask = nil
 
-        // 最後の確定結果まで書き切る（取りこぼし防止）。
-        try? await sink.flush()
+        // 3. 以降に到着する遅延結果を破棄するため世代を進める（停止後不追記の担保）。
+        generation += 1
+
+        // 4. 音声取得を停止しリソース解放。
+        await audioSource.stop()
+
+        // 5. 最後の確定結果まで書き切る（取りこぼし防止）。保存失敗は黙殺しない。
+        do {
+            try await sink.flush()
+        } catch {
+            transition(to: .error("transcript flush failed: \(error)"))
+            return
+        }
 
         transition(to: .stopped)
     }
 
-    /// タップ／認識エラー時。running → error（リソース解放）。
+    /// 認識タスクの完了を有界に待つ。port 契約どおり finalize() でストリームが終端していれば即完了する。
+    /// 万一終端しない実装でも stop() がハングしないよう、タイムアウトでキャンセルして打ち切る
+    /// （finalize 済みの確定結果は待機中に handle 済みのため取りこぼさない）。
+    private func drain(_ task: Task<Void, Never>, timeout: Duration = .milliseconds(100)) async {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await task.value; return true }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
+            }
+            let completedNormally = await group.next() ?? false
+            if !completedNormally { task.cancel() }
+            group.cancelAll()
+            // 残りのサブタスク（タイムアウト or task.value）の完了を待ち、確実に終端させる。
+            for await _ in group {}
+        }
+    }
+
+    /// タップ／認識エラー時。running/stopping → error（リソース解放）。
+    /// 公開 API（外部からの明示的エラー通知用）。
     public func failed(_ message: String) async {
+        await failed(message, generation: nil)
+    }
+
+    /// 内部用: 世代ガード付きの error 遷移。認識タスクから呼ぶ際は自世代でのみ遷移させ、
+    /// 既に停止済み（世代更新後）なら無視する。
+    private func failed(_ message: String, generation resultGeneration: Int?) async {
+        if let resultGeneration, resultGeneration != generation { return }
+        switch state {
+        case .stopped, .error:
+            return
+        default:
+            break
+        }
         generation += 1
-        await audioSource.stop()
         recognitionTask?.cancel()
         recognitionTask = nil
+        await audioSource.stop()
         transition(to: .error(message))
     }
 }

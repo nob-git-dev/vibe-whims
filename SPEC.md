@@ -468,8 +468,10 @@ Tests/
 | fake/stub | 対象 port | 役割 |
 |---|---|---|
 | `FakePermissionGate` | PermissionGate | granted/denied/undetermined と request 後状態を指定して権限分岐を検証 |
-| `FakeAudioSource` | AudioSource | 任意の AudioFrame を流す / start 失敗を再現 / stop 呼び出しを記録 |
-| `FakeSpeechRecognizer` | SpeechRecognizer | 指定した RecognitionResult 列（volatile/finalized 混在）を流す |
+| `FakeAudioSource` | AudioSource | 任意の AudioFrame を流す / start 失敗を再現 / **start 呼び出し回数（`startCalled`）と stop 呼び出しを記録**（denied 時に「音声取得を開始していない」を直接検証） |
+| `FakeSpeechRecognizer` | SpeechRecognizer | 指定した RecognitionResult 列（volatile/finalized 混在）を流す。`finalize()` は no-op |
+| `DeferredFinalizeRecognizer` | SpeechRecognizer | `finalize()` 呼び出しで**初めて**最後の finalized を流す実機相当の遅延配信を模す（Must-1 検証用） |
+| `FailingSpeechRecognizer` | SpeechRecognizer | `transcribe` ストリームを error 終端させ、認識/タップ異常終了からの error 状態遷移を検証（Should-3 用） |
 | `ManualSpeechRecognizer` | SpeechRecognizer | 外部から手動で結果を emit（停止後到着シナリオ用） |
 | `SpyTranscriptSink` | TranscriptSink | append/flush を記録し、保存内容と flush 回数を検証（actor） |
 
@@ -477,14 +479,16 @@ Tests/
 
 | 受け入れ条件 / 本質 | テストケース | 結果 |
 |---|---|---|
-| 未許可のまま音声取得を開始しない（権限要件・最重要） | `権限 denied のとき running に進まず awaitingPermission になる` | PASS |
-| 同上（undetermined→request→denied 経路） | `undetermined → request しても denied なら開始しない` | PASS |
+| 未許可のまま音声取得を開始しない（権限要件・最重要） | `権限 denied のとき running に進まず awaitingPermission になる`（**start が一度も呼ばれないことを `startCalled == false` で直接検証**） | PASS |
+| 同上（undetermined→request→denied 経路） | `undetermined → request しても denied なら開始しない`（**`startCalled == false` を直接検証**） | PASS |
 | 権限 granted で開始できる（undetermined→request→granted） | `undetermined のとき request して granted なら running になる` | PASS |
 | 対象選択（idle→selected 遷移） | `対象選択で idle → selected に遷移する` | PASS |
 | 確定結果が保存される / 保存対象は finalized のみ（ADR-3） | `granted で開始すると finalized のみが sink に保存され volatile は保存されない` | PASS |
 | 停止でき、停止時 finalize→flush で最後の確定まで保存（取りこぼし防止） | `停止すると stopping → stopped に遷移し flush が呼ばれる` | PASS |
+| **停止時 finalize で遅れて届く最後の finalized を取りこぼさず保存（Must-1・ADR-3）** | `停止時に finalize で遅れて届く最後の finalized が保存される` | PASS |
 | 停止後は追記されない（停止後不追記・最重要） | `停止後に到着した結果は保存・追記されない` | PASS |
 | タップ/認識エラーで error 状態（リソース解放・提示） | `AudioSource の start が失敗すると error 状態になる` | PASS |
+| **認識/タップのストリーム異常終了 → error 状態・リソース解放（Should-3）** | `認識ストリームが error 終端すると error 状態になりリソース解放される`（`audioSource.stop()` 呼び出しを検証） | PASS |
 | volatile/finalized 分離保持（ADR-3） | `volatile 結果は上書き表示用で finalized 列には積まれない` | PASS |
 | 同上 | `finalized 結果は確定列に追加され volatile はクリアされる` | PASS |
 | 確定の順序保持（取りこぼし・順序崩れ防止） | `複数の finalized は順序を保って確定列に積まれる` | PASS |
@@ -493,19 +497,24 @@ Tests/
 | 同上（locale 既定） | `LOCALE 省略時は ja-JP を既定にする` | PASS |
 | 出力先必須（保存先が無いと確定結果を保存できない） | `OUTPUT_PATH が無いとエラー` | PASS |
 | config ファイル不存在の扱い | `存在しないファイルはエラー` | PASS |
+| **保存先の親ディレクトリが無くても作成して保存（取りこぼし防止・Should）** | `親ディレクトリが存在しなくても作成してから保存する` | PASS |
+| **複数回 flush で既存内容に追記（停止時 flush で取りこぼさない）** | `flush を 2 回行うと既存内容に追記される` | PASS |
+| **保存失敗を黙殺せずエラーを伝播（Should）** | `保存できない場合はエラーを伝播し黙殺しない` | PASS |
+| **出力先パスの `~` 展開（Want）** | `出力先パスの ~ を展開して保存する` | PASS |
 
 ### テスト環境
 
 - フレームワーク: Swift Testing（`import Testing`）
-- 環境: 実機・OS API・権限なしで完結（fake port 注入のみ）。ConfigLoader テストは一時ディレクトリにファイル生成→破棄。
-- 実行コマンド: `swift test`
-- 結果: **16 tests / 4 suites すべて PASS**（macOS 26.5 / Swift 6.3.2）。
+- 環境: 実機・OS API・権限なしで完結（fake port 注入のみ）。ConfigLoader / FileTranscriptSink テストは一時ディレクトリ（一部はホーム配下のユニーク一時ディレクトリ）にファイル生成→破棄。
+- 実行コマンド: `swift test` / 警告ゼロ確認: `swift build -Xswiftc -strict-concurrency=complete`
+- 結果: **22 tests / 5 suites すべて PASS**（macOS 26.5 / Swift 6.3.2）。`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ。
+  - レビュー差し戻し対応で **+6 tests / +1 suite**（FileTranscriptSinkTests）を追加。Must-1（finalize 取りこぼし防止）・Should-2（start 直接検証）・Should-3（error 経路）・FileTranscriptSink 群を Red→Green で実装。
 
 ### カバー範囲
 
 - **domain（TDD で厚く）**: 値型、port protocol、`TranscriptStore`（volatile/finalized 分離）、
-  `TranscriptionService`（全状態遷移・権限分岐・取りこぼし防止・停止後不追記）。
-- **infrastructure（OS 非依存部のみテスト）**: `ConfigLoader`（設定外部化）。
+  `TranscriptionService`（全状態遷移・権限分岐・取りこぼし防止・**停止時 finalize→drain→flush**・停止後不追記・**認識ストリーム error 終端からの error 遷移**）。
+- **infrastructure（OS 非依存部のみテスト）**: `ConfigLoader`（設定外部化）、`FileTranscriptSink`（親ディレクトリ作成・追記・保存失敗のエラー伝播・`~` 展開）。
 - **アーキテクチャ**: domain の OS/UI 非 import をソース走査でガード。逆依存はコンパイル時に不可能化（確認済み）。
 
 ### infrastructure 手動検証項目（ユニットテストで担保できない＝実機検証が必要）
@@ -525,13 +534,17 @@ Tests/
 
 `ProcessTapAudioSource` / `SpeechAnalyzerAdapter` / `AudioCapturePermission` / `RunningAppProvider`
 / `AudioFormatConverter` は OS API 接触の実装を TODO とし、ビルドが通る最小スケルトンに留める。
-`FileTranscriptSink` / `ConfigLoader` は OS 非依存に近く実装済み（ConfigLoader はテスト済み）。
+`SpeechAnalyzerAdapter` は `finalize()` の protocol 適合を追加済み（実体は `SpeechAnalyzer.finalizeAndFinish(through:)` 等での実機結線 TODO。`transcribe` は `AsyncThrowingStream` 化し、異常終了は `finish(throwing:)` で domain へ伝播する旨を TODO コメントに明記）。
+`FileTranscriptSink` / `ConfigLoader` は OS 非依存に近く実装済み・テスト済み（FileTranscriptSink は親ディレクトリ作成・保存失敗のエラー伝播・`~` 展開を含む）。
 presentation の実 @main アプリ・メニューバー UI は /deploy フェーズで Xcode app target として構築する。
 
 ## レビュー結果
 <!-- /review が追記 -->
 
 ### 判定: 修正依頼（Must 1 件 / Should 4 件 / Want 3 件）
+
+> **対応状況（/tdd 差し戻し対応, 2026-05-27）: Must-1 + Should 4 件すべて Resolved。Want は容易な 2 件（`~` 展開・`NotImplemented` 配置）を対応。**
+> Red→Green→Refactor で各修正に先立ち失敗するテストを追加。`swift test` で **22 tests / 5 suites 全 PASS**、`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロを確認済み。各指摘の対応概要は「### 指摘事項」表の「対応状況」列を参照。
 
 domain 層中心 TDD の構造・品質は総じて高い。3層一方向依存・port 境界の OS 型非漏洩・設定外部化・
 状態遷移の本質テストは適切に担保されている。`swift test` も報告どおり **16 tests / 4 suites 全 PASS**
@@ -559,22 +572,22 @@ domain 境界で構造的に担保できない点を Must とする。
 - [x] 未許可のまま開始しない（最重要・権限要件）: denied / undetermined→denied の両経路で `awaitingPermission` に留まり running に進まないテストが PASS。
 - [x] 停止後は追記されない（最重要）: 世代（generation）ガードで停止後到着結果を破棄。`resultsAfterStopAreDiscarded` で検証 PASS。
 - [x] 確定結果のみ保存（取りこぼし防止・ADR-3）: `onlyFinalizedIsSaved` で finalized のみ sink に積まれることを検証 PASS。
-- [~] 停止時 finalize→flush で最後の確定まで保存: **flush は呼ばれるが finalize 相当の処理が無い**（下記 Must-1）。
-- [x] エラーで error 状態: `audioStartFailureGoesError` PASS（ただし `failed()` 経路は未テスト、Should-2）。
+- [x] 停止時 finalize→flush で最後の確定まで保存: **Must-1 対応で Resolved**。`SpeechRecognizer.finalize()` を port に追加し、`stop()` は finalize→残り finalized 取り込み→flush の順に変更。`stopFinalizesAndSavesLastFinalized` で finalize 後に遅れて届く最後の finalized が保存されることを検証 PASS。
+- [x] エラーで error 状態: `audioStartFailureGoesError` PASS に加え、**Should-3 対応で**認識ストリーム error 終端 → `failed()` → error 遷移・`audioSource.stop()` 解放を `recognitionStreamErrorGoesError` で検証 PASS（`failed()` が実経路で使用される形に）。
 - [-] 非混入・リアルタイム遅延・実保存: infrastructure 実機検証項目として正しく未検証扱い（誤魔化しなし）。
 
 ### 指摘事項
 
-| 重要度 | 場所 | 内容 | 改善案 |
-|---|---|---|---|
-| **Must** | `TranscriptionService.stop()` / `SpeechRecognizer` port | SPEC・ADR-3 は「停止時に `finalize` してから flush し、最後の確定結果まで取りこぼさない」ことを要求しているが、`stop()` は `audioSource.stop()` → `recognitionTask.cancel()` → `sink.flush()` の順で、**認識器を finalize していない**。`recognitionTask?.cancel()` は `for await` を即時に打ち切るため、認識器側に残っている「volatile を最終確定に昇格した finalized」や未配信の finalized が **domain に届く前に破棄され得る**。`SpeechRecognizer` port に finalize 手段が無く、この取りこぼし防止本質を境界で構造的に担保できない。fake は即時に全結果を流すため現テストでは露見しないが、実際の SpeechAnalyzer はストリーミングで遅れて finalized を流すため取りこぼしが起きる。 | `SpeechRecognizer` に `func finalize() async`（または stream を「最後まで読み切る」契約）を追加し、`stop()` で `cancel()` する前に「入力ストリーム終端→finalize→残りの finalized を全て handle→flush」の順を保証する。テストは「stop 後も in-flight の finalized が flush 前に保存される」ケースを ManualSpeechRecognizer で追加する。 |
-| Should | `Tests/.../Fakes.swift` `FakeAudioSource` | `start` の呼び出しを記録するフラグが無く、denied テストの「音声取得を開始していない」検証が `stopCalled == false` の弱い間接確認に留まる（開始したが stop 未呼でも false になり得る）。受け入れ条件「未許可のまま音声取得を開始しない」の本質を直接担保できていない。 | `FakeAudioSource` に `startCalled`（または開始回数）を持たせ、denied/undetermined→denied テストで `#expect(audio.startCalled == false)` を直接アサートする。 |
-| Should | `TranscriptionService.failed()` | `public` だが呼び出し元・テストともに存在しない。状態遷移図の `running → error`（タップ/認識エラー時のリソース解放）を担保するメソッドが未テストで、`audioSource.stop()` が呼ばれること・error 状態化が未検証。デッドコード化のリスクもある。 | `failed()` を呼ぶテストを追加（`audioSource.stop()` 呼び出しと `.error` 遷移を検証）。あるいは認識ストリームのエラー終端から自動で `failed()` に至る結線を実装し、その経路をテストする。 |
-| Should | `TranscriptionService.handle()` の `weak self` | `recognitionTask` 内で `[weak self]` を使い `guard let self else { return }` しているが、`TranscriptionService` は actor であり、認識タスクが回っている間 service が解放される状況は通常ない。`weak` にすると、何らかの理由で service 参照が切れた際に「ストリーム消費が静かに止まる」挙動になり、意図が不明瞭。 | actor のライフサイクルとタスク所有関係を整理し、`weak` の必要性を判断。不要なら強参照にして意図を明確化（または `weak` を残す根拠をコメント化）。 |
-| Should | `FileTranscriptSink.flush()` | 親ディレクトリが存在しない場合（例: `~/Documents/speech-tap/`）`data.write` / `FileHandle` が失敗する。確定結果保存の本質に関わるが、`append`/`flush` の戻りエラーは `TranscriptionService` で `try?` で握り潰されており、保存失敗がユーザーに伝わらない。 | flush 前に出力先ディレクトリを `createDirectory(withIntermediateDirectories:)` で用意する。併せて domain 側で保存失敗時のエラー提示（error 状態 or UI 通知）方針を検討（現状 `try?` で黙殺は受け入れ条件「確定結果が保存される」と緊張関係）。 |
-| Want | `config.example.conf` の `OUTPUT_PATH` | `~/Documents/...` のチルダ展開を `ConfigLoader` が行わない（`URL(fileURLWithPath:)` はチルダを展開しない）。設定例のままだとカレント配下に `~` という名のディレクトリを作る恐れ。 | `ConfigLoader` または `FileTranscriptSink` で `NSString(string:).expandingTildeInPath` を適用する。 |
-| Want | `TranscriptStore.finalizedText` | セパレータを半角スペース固定で結合しているが、日本語（既定 ja-JP）では不自然。表示用途に限るがロケール非考慮。 | 連結ポリシーをロケール/用途に応じて見直す（保存は `TranscriptSink` 側で区切り済みのため影響軽微）。 |
-| Want | `NotImplemented` enum の配置 | `ProcessTapAudioSource.swift` のファイル末尾に infra 共通のエラー型が定義されており発見しづらい。 | 専用ファイル（例: `InfraErrors.swift`）に切り出すと一貫性が上がる。 |
+| 重要度 | 場所 | 内容 | 改善案 | 対応状況 |
+|---|---|---|---|---|
+| **Must** | `TranscriptionService.stop()` / `SpeechRecognizer` port | SPEC・ADR-3 は「停止時に `finalize` してから flush し、最後の確定結果まで取りこぼさない」ことを要求しているが、`stop()` は `audioSource.stop()` → `recognitionTask.cancel()` → `sink.flush()` の順で、**認識器を finalize していない**。`recognitionTask?.cancel()` は `for await` を即時に打ち切るため、認識器側に残っている「volatile を最終確定に昇格した finalized」や未配信の finalized が **domain に届く前に破棄され得る**。`SpeechRecognizer` port に finalize 手段が無く、この取りこぼし防止本質を境界で構造的に担保できない。fake は即時に全結果を流すため現テストでは露見しないが、実際の SpeechAnalyzer はストリーミングで遅れて finalized を流すため取りこぼしが起きる。 | `SpeechRecognizer` に `func finalize() async`（または stream を「最後まで読み切る」契約）を追加し、`stop()` で `cancel()` する前に「入力ストリーム終端→finalize→残りの finalized を全て handle→flush」の順を保証する。テストは「stop 後も in-flight の finalized が flush 前に保存される」ケースを追加する。 | **Resolved**: `SpeechRecognizer` port に `func finalize() async` を追加（残り volatile を確定へ昇格し未配信 finalized を流し切ってストリーム終端する契約をコメント明記）。`stop()` を「finalize → 認識タスクを drain（finalize で遅れて届く finalized を `.stopping` 中・同一世代で handle/append）→ 世代更新 → audioSource.stop → flush」の順に変更し、即時 cancel を廃止。drain は契約違反でハングしないよう有界（100ms でキャンセル fallback）。`handle()` は `.running`/`.stopping` の同一世代のみ受理。`DeferredFinalizeRecognizer`（finalize 後に最後の finalized を遅延配信）で `stopFinalizesAndSavesLastFinalized` を追加し、Must-1 修正前は Red（旧 stop では取りこぼし）→ 修正後 Green を確認。既存の停止後不追記テストも引き続き PASS（finalize で正規に流すものと停止後の不正追記を区別）。 |
+| Should | `Tests/.../Fakes.swift` `FakeAudioSource` | `start` の呼び出しを記録するフラグが無く、denied テストの「音声取得を開始していない」検証が `stopCalled == false` の弱い間接確認に留まる（開始したが stop 未呼でも false になり得る）。受け入れ条件「未許可のまま音声取得を開始しない」の本質を直接担保できていない。 | `FakeAudioSource` に `startCalled`（または開始回数）を持たせ、denied/undetermined→denied テストで `#expect(audio.startCalled == false)` を直接アサートする。 | **Resolved**: `FakeAudioSource` に `startCount`/`startCalled` を追加し、`deniedDoesNotStartAndGoesAwaitingPermission` と `undeterminedRequestDeniedDoesNotStart` の両権限拒否経路で `#expect(audio.startCalled == false)` を直接アサート。 |
+| Should | `TranscriptionService.failed()` | `public` だが呼び出し元・テストともに存在しない。状態遷移図の `running → error`（タップ/認識エラー時のリソース解放）を担保するメソッドが未テストで、`audioSource.stop()` が呼ばれること・error 状態化が未検証。デッドコード化のリスクもある。 | `failed()` を呼ぶテストを追加（`audioSource.stop()` 呼び出しと `.error` 遷移を検証）。あるいは認識ストリームのエラー終端から自動で `failed()` に至る結線を実装し、その経路をテストする。 | **Resolved**: `transcribe` を `AsyncThrowingStream` 化し、認識/タップのストリーム異常終了（`finish(throwing:)`）を認識タスクが catch して `failed(_:generation:)` を呼ぶ結線を実装（`CancellationError` は error 扱いしない）。`failed()` が実経路で使われる形になった。`FailingSpeechRecognizer` で `recognitionStreamErrorGoesError` を追加し、error 遷移と `audioSource.stop()` 呼び出し（リソース解放）を検証 PASS。 |
+| Should | `TranscriptionService.handle()` の `weak self` | `recognitionTask` 内で `[weak self]` を使い `guard let self else { return }` しているが、`TranscriptionService` は actor であり、認識タスクが回っている間 service が解放される状況は通常ない。`weak` にすると、何らかの理由で service 参照が切れた際に「ストリーム消費が静かに止まる」挙動になり、意図が不明瞭。 | actor のライフサイクルとタスク所有関係を整理し、`weak` の必要性を判断。不要なら強参照にして意図を明確化（または `weak` を残す根拠をコメント化）。 | **Resolved**: `recognitionTask` は `self` が所有し `stop()`/`failed()` で nil 化して破棄するため、`[weak self]` を廃止し強参照に変更。意図（タスク完了 or nil 化で循環解消、weak だとストリーム消費が静かに止まり挙動が不明瞭になる点）をコメントで明記。 |
+| Should | `FileTranscriptSink.flush()` | 親ディレクトリが存在しない場合（例: `~/Documents/speech-tap/`）`data.write` / `FileHandle` が失敗する。確定結果保存の本質に関わるが、`append`/`flush` の戻りエラーは `TranscriptionService` で `try?` で握り潰されており、保存失敗がユーザーに伝わらない。 | flush 前に出力先ディレクトリを `createDirectory(withIntermediateDirectories:)` で用意する。併せて domain 側で保存失敗時のエラー提示（error 状態 or UI 通知）方針を検討（現状 `try?` で黙殺は受け入れ条件「確定結果が保存される」と緊張関係）。 | **Resolved**: `FileTranscriptSink.flush()` で書き込み前に `FileManager.createDirectory(withIntermediateDirectories: true)` で親ディレクトリを用意。`TranscriptionService` の `try?` 握り潰しを廃止し、`sink.append` 失敗→`failed()`、`sink.flush` 失敗→`error` 状態へ遷移（保存失敗を黙殺しない）。一時ディレクトリで `createsParentDirectoryAndWrites`/`appendsAcrossFlushes`/`propagatesWriteError` を追加し PASS。 |
+| Want | `config.example.conf` の `OUTPUT_PATH` | `~/Documents/...` のチルダ展開を `ConfigLoader` が行わない（`URL(fileURLWithPath:)` はチルダを展開しない）。設定例のままだとカレント配下に `~` という名のディレクトリを作る恐れ。 | `ConfigLoader` または `FileTranscriptSink` で `NSString(string:).expandingTildeInPath` を適用する。 | **Resolved**: `FileTranscriptSink.init` で `(outputPath as NSString).expandingTildeInPath` を適用。`expandsTilde` テストでホーム配下に展開され、カレント配下に `~` を作らないことを検証 PASS。 |
+| Want | `TranscriptStore.finalizedText` | セパレータを半角スペース固定で結合しているが、日本語（既定 ja-JP）では不自然。表示用途に限るがロケール非考慮。 | 連結ポリシーをロケール/用途に応じて見直す（保存は `TranscriptSink` 側で区切り済みのため影響軽微）。 | 未対応（表示用途限定・影響軽微のため今回スコープ外。保存は `TranscriptSink` 側で改行区切り済み）。 |
+| Want | `NotImplemented` enum の配置 | `ProcessTapAudioSource.swift` のファイル末尾に infra 共通のエラー型が定義されており発見しづらい。 | 専用ファイル（例: `InfraErrors.swift`）に切り出すと一貫性が上がる。 | **Resolved**: `Sources/SpeechTapInfrastructure/InfraErrors.swift` に切り出し。 |
 
 ### 良い点
 

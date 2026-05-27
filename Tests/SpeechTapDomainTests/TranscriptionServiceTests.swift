@@ -48,7 +48,8 @@ struct TranscriptionServiceTests {
 
         let state = await service.state
         #expect(state == .awaitingPermission(app))
-        // 音声取得を開始していないこと（start が呼ばれず stop 不要、frames も流れない）を間接確認。
+        // 受け入れ条件「未許可のまま音声取得を開始しない」を直接検証する（start が一度も呼ばれない）。
+        #expect(audio.startCalled == false)
         #expect(audio.stopCalled == false)
     }
 
@@ -69,9 +70,10 @@ struct TranscriptionServiceTests {
 
     @Test("undetermined → request しても denied なら開始しない")
     func undeterminedRequestDeniedDoesNotStart() async {
+        let audio = FakeAudioSource()
         let service = makeService(
             permission: FakePermissionGate(initial: .undetermined, afterRequest: .denied),
-            audio: FakeAudioSource(),
+            audio: audio,
             recognizer: FakeSpeechRecognizer(results: []),
             sink: SpyTranscriptSink()
         )
@@ -79,6 +81,8 @@ struct TranscriptionServiceTests {
         await service.start(app: app)
         let state = await service.state
         #expect(state == .awaitingPermission(app))
+        // request 後も denied なら音声取得を開始しない（start を一度も呼ばない）。
+        #expect(audio.startCalled == false)
     }
 
     /// 受け入れ条件「確定結果が保存される」＋ ADR-3「保存対象は finalized のみ」。
@@ -171,6 +175,64 @@ struct TranscriptionServiceTests {
         } else {
             Issue.record("expected .error, got \(state)")
         }
+    }
+
+    /// Must-1: 停止時に finalize で遅れて届く最後の finalized が取りこぼされず保存される（ADR-3）。
+    /// stop 呼び出し時点ではまだ流していない finalized を、finalize() 後に流す recognizer で再現する。
+    @Test("停止時に finalize で遅れて届く最後の finalized が保存される（取りこぼし防止）")
+    func stopFinalizesAndSavesLastFinalized() async {
+        let sink = SpyTranscriptSink()
+        let recognizer = DeferredFinalizeRecognizer(
+            immediate: [RecognitionResult(text: "途中。", isFinal: true)],
+            onFinalize: [
+                RecognitionResult(text: "最後の暫定が確定。", isFinal: true)
+            ]
+        )
+        let service = makeService(
+            permission: FakePermissionGate(initial: .granted),
+            audio: FakeAudioSource(frames: [.dummy()]),
+            recognizer: recognizer,
+            sink: sink
+        )
+        await service.start(app: AppId("a"))
+        // running 中に届く finalized を待つ。
+        try? await waitUntil { await service.transcriptStore.finalizedSegments.count == 1 }
+
+        // 停止: finalize → 遅延 finalized 受領 → append → flush の順で取りこぼさない。
+        await service.stop()
+
+        let state = await service.state
+        #expect(state == .stopped)
+        // finalize 後に届いた最後の確定も保存されていること（取りこぼさない）。
+        #expect(await sink.appended.map(\.text) == ["途中。", "最後の暫定が確定。"])
+        #expect(await sink.flushCount == 1)
+    }
+
+    /// Should-3: 認識/タップのストリームが error 終端すると error 状態へ遷移し、
+    /// audioSource.stop() でリソース解放される（状態遷移図 running → error）。
+    @Test("認識ストリームが error 終端すると error 状態になりリソース解放される")
+    func recognitionStreamErrorGoesError() async {
+        let audio = FakeAudioSource(frames: [.dummy()])
+        let service = makeService(
+            permission: FakePermissionGate(initial: .granted),
+            audio: audio,
+            recognizer: FailingSpeechRecognizer(before: [RecognitionResult(text: "途中。", isFinal: true)]),
+            sink: SpyTranscriptSink()
+        )
+        await service.start(app: AppId("a"))
+        // error 状態へ遷移するのを待つ。
+        try? await waitUntil {
+            if case .error = await service.state { return true }
+            return false
+        }
+        let state = await service.state
+        if case .error = state {
+            // OK
+        } else {
+            Issue.record("expected .error, got \(state)")
+        }
+        // error 経路でも audioSource.stop() が呼ばれリソース解放される。
+        #expect(audio.stopCalled == true)
     }
 }
 
