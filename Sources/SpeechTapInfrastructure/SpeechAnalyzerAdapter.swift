@@ -1,10 +1,14 @@
 import Foundation
+import Synchronization
 import SpeechTapDomain
 #if canImport(Speech)
 import Speech
 #endif
 #if canImport(AVFoundation)
 import AVFoundation
+#endif
+#if canImport(os)
+import os
 #endif
 
 /// SpeechRecognizer 実装: Apple SpeechAnalyzer / SpeechTranscriber（固定要件・macOS 26+）。
@@ -21,6 +25,9 @@ import AVFoundation
 /// - 言語モデル未インストール時の AssetInstallationRequest フロー。
 public final class SpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable {
     private let converter = AudioFormatConverter()
+    #if canImport(os)
+    private let log = AppLog.logger(.analyzer)
+    #endif
 
     // finalize() で SpeechAnalyzer を終端するための状態（直近の transcribe セッション）。
     private let stateLock = NSLock()
@@ -79,6 +86,9 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable 
     @available(macOS 26.0, *)
     private func makeStream(audio: AsyncStream<AudioFrame>, locale: Locale) -> AsyncThrowingStream<RecognitionResult, Error> {
         let converter = self.converter
+        #if canImport(os)
+        let log = self.log
+        #endif
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -88,17 +98,43 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable 
                         reportingOptions: [.volatileResults],
                         attributeOptions: []
                     )
+                    #if canImport(os)
+                    log.info("transcribe start locale=\(locale.identifier, privacy: .public)")
+                    #endif
 
                     // 言語モデルが未インストールなら導入を要求する（オンデバイス）。
                     if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                        #if canImport(os)
+                        log.info("asset installation required -> downloading")
+                        #endif
                         try await request.downloadAndInstall()
+                        #if canImport(os)
+                        log.info("asset installation finished")
+                        #endif
+                    } else {
+                        #if canImport(os)
+                        log.info("asset already installed (no installation request)")
+                        #endif
                     }
 
                     guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                        #if canImport(os)
+                        log.error("bestAvailableAudioFormat returned nil")
+                        #endif
                         continuation.finish(throwing: NotImplemented.speechAnalyzer)
                         return
                     }
                     let targetFormat = AudioFormatConverter.streamFormat(from: analyzerFormat)
+                    #if canImport(os)
+                    log.info(
+                        """
+                        analyzerFormat: sampleRate=\(analyzerFormat.sampleRate) \
+                        channels=\(analyzerFormat.channelCount) \
+                        interleaved=\(analyzerFormat.isInterleaved) \
+                        commonFormat=\(analyzerFormat.commonFormat.rawValue)
+                        """
+                    )
+                    #endif
 
                     // SpeechAnalyzer へ AnalyzerInput を供給する入力ストリーム。
                     let (inputStream, inputCont) = AsyncStream.makeStream(of: AnalyzerInput.self)
@@ -110,27 +146,68 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable 
 
                     try await analyzer.start(inputSequence: inputStream)
 
+                    // 観測カウンタ（feeder/results は非リアルタイムタスクなので atomic で共有）。
+                    let feedReceived = Atomic<Int>(0)
+                    let feedConverted = Atomic<Int>(0)
+                    let feedDropped = Atomic<Int>(0)
+
                     // 入力供給タスク: AudioFrame → 変換 → AVAudioPCMBuffer → AnalyzerInput。
                     let feeder = Task {
                         for await frame in audio {
+                            let n = feedReceived.add(1, ordering: .relaxed).newValue
                             let converted = converter.convert(frame, to: targetFormat)
                             if let buffer = AudioFormatConverter.pcmBuffer(from: converted, format: analyzerFormat) {
                                 inputCont.yield(AnalyzerInput(buffer: buffer))
+                                let y = feedConverted.add(1, ordering: .relaxed).newValue
+                                #if canImport(os)
+                                if y <= 3 {
+                                    log.info("feeder yielded buffer #\(y): inSamples=\(frame.samples.count) bufferFrames=\(buffer.frameLength)")
+                                }
+                                #endif
+                            } else {
+                                // 仮説 C 判定: 変換で nil（drop）になったフレーム数。
+                                let d = feedDropped.add(1, ordering: .relaxed).newValue
+                                #if canImport(os)
+                                if d <= 3 {
+                                    log.error("feeder DROPPED frame #\(n) (pcmBuffer==nil): inSamples=\(frame.samples.count) declaredChannels=\(frame.format.channelCount)")
+                                }
+                                #endif
                             }
                         }
                         // 入力ストリーム（audio）が終端したら analyzer 入力も終端する。
                         inputCont.finish()
+                        #if canImport(os)
+                        log.info(
+                            "feeder summary: received=\(feedReceived.load(ordering: .relaxed)) converted=\(feedConverted.load(ordering: .relaxed)) dropped=\(feedDropped.load(ordering: .relaxed))"
+                        )
+                        #endif
                     }
 
                     // 結果受信: volatile/finalized を RecognitionResult に正規化して流す。
+                    var volatileResults = 0
+                    var finalizedResults = 0
                     for try await result in transcriber.results {
                         let text = String(result.text.characters)
                         let start = result.range.start.seconds
                         let end = result.range.end.seconds
                         let range: ClosedRange<Double>? = (start.isFinite && end.isFinite && end >= start) ? start...end : nil
+                        #if canImport(os)
+                        if result.isFinal {
+                            finalizedResults += 1
+                            log.info("results received finalized #\(finalizedResults) len=\(text.count)")
+                        } else {
+                            volatileResults += 1
+                            if volatileResults <= 3 || volatileResults % 20 == 0 {
+                                log.info("results received volatile #\(volatileResults) len=\(text.count)")
+                            }
+                        }
+                        #endif
                         continuation.yield(RecognitionResult(text: text, isFinal: result.isFinal, range: range))
                     }
                     feeder.cancel()
+                    #if canImport(os)
+                    log.info("results stream ended: volatile=\(volatileResults) finalized=\(finalizedResults)")
+                    #endif
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish()

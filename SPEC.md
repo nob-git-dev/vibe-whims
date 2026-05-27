@@ -831,3 +831,113 @@ ad-hoc 署名は証明書・秘密鍵を一切使わない。`.gitignore` で `b
 
 > 結論: ビルド・バンドル化・署名・起動可能化までは完了し、**ユーザーが実機で TCC 権限を付与して手動検証（特に最重要 = 非混入）を実行できる状態**になった。
 > 実音声・実権限・GUI 目視が必要な受け入れ条件は runbook に沿って人間が確定する。目的・最重要本質「非混入」とのズレは無い（バンドル化は非混入の構造的担保 `stereoMixdownOfProcesses` をそのまま実機で検証可能にするもの）。
+
+## オブザーバビリティ設計
+<!-- /observe が追記 -->
+
+### 背景・目的（解決する品質問題）
+
+実機検証で「状態は **running（文字化中）** になる（＝権限許可・タップ生成・Aggregate Device 生成・
+`AudioDeviceStart`・SpeechAnalyzer 開始・モデル導入・`bestAvailableAudioFormat` 取得まで成功）」のに
+**認識結果が 1 件も出ない**。ブラウザでも単一プロセスアプリ（ミュージック等）でも同様に空。
+現状コードにログが一切無く、**音声フレームがパイプラインのどこまで流れ、どこで消えるかが追跡不能**だった
+（＝可観測性の欠如という品質問題）。
+
+本フェーズは黒箱を可観測にするための**構造化ログ（os.Logger）を実装**する。原因の修正は次フェーズ（/tdd）。
+モニタリング（既知の閾値監視）ではなく、未知の不具合を**調査**できるようにするオブザーバビリティの実装である。
+
+### ログ基盤（subsystem / category）
+
+- **subsystem 統一**: `com.example.speech-tap`（`AppLog.subsystem`）。`log stream --predicate 'subsystem == "..."'` で一括観測する。
+- **category で観測点を分離**（`AppLog.Category`）:
+
+| category | 観測点 | 主に判定する仮説 |
+|---|---|---|
+| `tap` | Process Tap 構成・起動（PID 解決 / `processObjectID` / tap native ASBD 全フィールド / aggregateID / `AudioDeviceStart` / stop サマリ） | A（IOProc 未呼び出し）・B（フォーマット） |
+| `ioproc` | IOProc コールバック（`mNumberBuffers` / 先頭バッファの `mNumberChannels`・`mDataByteSize` / 算出 floatCount / 宣言 format）。最初の 3 回のみ出力 | A・B |
+| `analyzer` | SpeechAnalyzer 供給・結果受信（`analyzerFormat` / アセット導入有無 / feeder received・converted・dropped / results volatile・finalized） | C（変換 nil drop）・D（results 出ない） |
+| `converter` | フォーマット変換のフォールバック発生（AVAudioConverter 経路失敗。入力/target format 付き、最初の 3 回のみ） | B・C |
+| `app` | domain の状態遷移・権限分岐・認識結果受信件数・error/保存失敗（`EventLogger` port 経由） | 状態の全体追跡 |
+
+### 3層一方向依存の維持（domain を OS 非依存のまま可観測化）
+
+固定要件「domain は OS API（os.Logger/OSLog）を import しない」を守るため、**port + 注入**で観測する:
+
+- domain 側に薄い `EventLogger` protocol（`Sources/SpeechTapDomain/ports/EventLogger.swift`）を定義。Foundation のみ依存。既定実装は no-op の `NullEventLogger`。
+- 実体（os.Logger ラッパ）は infrastructure の `OSEventLogger`（`Sources/SpeechTapInfrastructure/OSEventLogger.swift`）に置き、**Composition Root（`AppDelegate`）でのみ注入**する。
+- これにより `TranscriptionService` は OS を import せず可観測になり、`ArchitectureGuardTests`（domain の禁止 import 走査）も維持される（**`swift test` 22 tests / 5 suites 全 PASS**、`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロを確認済み）。
+
+### リアルタイム安全性の配慮（IOProc）
+
+IOProc はリアルタイムスレッドであり、確保・ロック・ブロッキングを増やさないことが固定要件。
+
+- 呼び出し回数・yield フレーム数は `Synchronization.Atomic<Int>` で**ロックフリーに加算**するのみ。
+- `Logger` 呼び出しは**最初の 3 回だけ**に間引く（`callIndex <= 3`）。総量は `stop()` 時に 1 回だけサマリ出力する。
+- `Logger` は Sendable な値型のため、IOProc ブロックには `self` を捕捉せず**値コピー**で渡す。
+- feeder/results ループは非リアルタイムタスクのため、件数は atomic / ローカル変数で集計し、先頭数件 + 区切り（20 件毎）で間引きログする。
+
+### ログ収集 runbook（実機での観測手順）
+
+事前準備: 音声を出すアプリ（ブラウザで動画再生 or ミュージック）を 1 つ。
+
+1. **ログをストリーム表示**（別ターミナル。アプリ起動前に開始しておく）:
+   ```
+   log stream --predicate 'subsystem == "com.example.speech-tap"' --info --debug
+   ```
+   - 特定 category だけ見たい場合: `--predicate 'subsystem == "com.example.speech-tap" && category == "ioproc"'`
+2. **アプリを起動**（stderr も見たい場合はバイナリ直起動）:
+   ```
+   open build/SpeechTap.app
+   # もしくは stderr も見る:
+   build/SpeechTap.app/Contents/MacOS/SpeechTapApp
+   ```
+3. メニューから**対象アプリを選択**。
+4. **「文字化を開始」** → 権限許可 → 対象アプリで**音声を再生**。
+5. しばらく流したら**「文字化を停止」**（`tap` の stop サマリ・`analyzer` の feeder/results サマリが出る）。
+6. ストリームに出たログを下表（仮説対応表）で判定する。
+7. 過去ログを後から見る場合: `log show --predicate 'subsystem == "com.example.speech-tap"' --info --debug --last 10m`
+
+### 仮説 → ログ判定対応表
+
+「結果ゼロ」の原因を、どのログ行で切り分けるかの対応表。
+
+| 仮説 | 内容 | 判定するログ（category: 行） | 判定基準 |
+|---|---|---|---|
+| **A** | IOProc が一度も呼ばれない（タップが無音） | `tap`: `stop summary: ioProcCalls=... yieldedFrames=...` / `ioproc`: `IOProc call #1..3` | `ioProcCalls=0`（call ログも出ない）なら A 確定。タップ自体は成功でも音が来ていない |
+| **B** | IOProc は呼ばれるがフォーマット解釈が誤り | `tap`: `tap native ASBD: ...`（isFloat/isNonInterleaved/channelsPerFrame/bytesPerFrame）/ `ioproc`: `mNumberBuffers=... first.mNumberChannels=... first.mDataByteSize=... computedFloatCount=... declaredFormat.channels=...` | `mNumberBuffers>1`（非インターリーブ）なのに先頭バッファのみ読む / `isFloat=false` / `declaredFormat.channels` と `first.mNumberChannels` の不整合があれば B（後述「未解決事項」も参照） |
+| **C** | 変換が nil を返し全フレームが黙って捨てられる | `analyzer`: `feeder DROPPED frame #...（pcmBuffer==nil）` / `feeder summary: received=... converted=... dropped=...` / `converter`: `convert FALLBACK #...` | `dropped > 0` かつ `converted == 0` なら C 確定。`converter` の FALLBACK 連発も変換経路破綻の兆候 |
+| **D** | バッファは渡るが results が出ない | `analyzer`: `analyzerFormat: ...` / `feeder summary: ...converted=N(>0)` / `results stream ended: volatile=... finalized=...` | `converted>0` なのに `results ... volatile=0 finalized=0` なら D（analyzerFormat 不一致・無音入力・モデル等）。`asset installation` ログでモデル導入状態も確認 |
+
+> 補助: `app` category の `recognition result ...` / `stop requested; received so far volatile=... finalized=...` で
+> **domain まで結果が届いているか**を確認できる（infra の `results stream ended` と domain の受信件数が一致するか）。
+
+### ログ実装中に気づいた疑わしいバグ（未解決事項・修正は /tdd 判断）
+
+> 根拠として記録する。**今回は修正せず**、ログ（特に仮説 B/C 系）で実機確認した上で /tdd フェーズで対処する。
+
+1. **【最有力 / 仮説 B+C】非インターリーブ stereo でのチャンネル取りこぼし + フォーマット矛盾。**
+   - `ProcessTapAudioSource` の IOProc は `ablPointer.first`（先頭バッファ）**のみ**を読み、
+     `floatCount = first.mDataByteSize / sizeof(Float)` を全サンプルとして `AudioFrame` を作る
+     （`ProcessTapAudioSource.swift` の IOProc 内）。
+   - しかし `AudioFrame.format` には tap native の `channelCount`（stereo なら 2）を付与する。
+   - **非インターリーブ stereo なら ABL は 2 バッファ（チャンネル毎）**で、先頭バッファには 1ch 分の N サンプルしか無い。
+     よって「N サンプルしか無いのに format は 2ch」という**サンプル数とフォーマットの矛盾**が生じる。
+   - これが下流の `AudioFormatConverter.pcmBuffer` に波及する: `frameCapacity = samples.count / channels = N/2`、
+     さらに非インターリーブ分配で `samples[i*channels + ch]` と**インターリーブ前提のインデックス**で読むため、
+     1ch の連続データを stereo として誤って分配する（音が壊れる・半分になる）。
+   - **対応方針案（/tdd）**: IOProc で ABL の全バッファ（全チャンネル）を読む、または「先頭バッファ 1ch のみ採用し format も 1ch（mono）に揃える」のどちらかに統一し、IOProc が作る samples 数と `AudioFrame.format.channelCount` を**必ず整合**させる。`pcmBuffer` の非インターリーブ分配ロジックも samples レイアウト定義に合わせて見直す。
+2. **【仮説 B】tap native format が float / interleaved である保証が無い。**
+   - 現コードは IOProc で無条件に `mData` を `Float` として読む。tap native が int / 別レイアウトなら誤読する。
+   - → `tap native ASBD` ログ（`isFloat` / `bitsPerChannel` / `formatID`）で実値を確認してから /tdd で対処。
+3. **（軽微）`AudioFormatConverter.convert` のフォールバックが変換失敗を黙ってパススルーする。**
+   - walking skeleton 用フォールバックだが、実機で AVAudioConverter 経路が失敗していても気づきにくい。
+     本フェーズで FALLBACK 発生をログ化した（`converter` category）。多発するなら 1 の format 矛盾が原因の可能性。
+
+### ログした具体ポイント一覧（実装箇所）
+
+- `ProcessTapAudioSource.start`: PID 解決 / `processObjectID` / tap created / **tap native ASBD 全フィールド** / aggregate created / `AudioDeviceStart` status。
+- `ProcessTapAudioSource` IOProc: 呼び出し回数（atomic, 先頭 3 回のみログ + stop サマリ）/ `mNumberBuffers` / 先頭バッファの `mNumberChannels`・`mDataByteSize` / 算出 floatCount / 宣言 format。
+- `ProcessTapAudioSource.stop`: `ioProcCalls` / `yieldedFrames` サマリ。
+- `SpeechAnalyzerAdapter`: locale / asset 導入有無 / **analyzerFormat（sampleRate/channels/interleaved/commonFormat）** / feeder received・converted・dropped（+ サマリ）/ results volatile・finalized（+ サマリ）。
+- `AudioFormatConverter.convert`: 変換フォールバック発生（入力/target format、先頭 3 回）。
+- `TranscriptionService`（domain, `EventLogger` 経由）: 状態遷移 / 権限 currentStatus・afterRequest / audioSource.start 成功 / 認識結果受信件数（volatile/finalized）/ stop 時サマリ / error・保存失敗。

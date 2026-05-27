@@ -35,7 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 recognizer: SpeechAnalyzerAdapter(),
                 permissionGate: AudioCapturePermission(),
                 sink: FileTranscriptSink(outputPath: cfg.outputPath),
-                locale: cfg.locale
+                locale: cfg.locale,
+                // domain の観測点を os.Logger 実装で注入（domain は OS 非依存のまま可観測化）。
+                eventLogger: OSEventLogger()
             )
             self.service = service
 

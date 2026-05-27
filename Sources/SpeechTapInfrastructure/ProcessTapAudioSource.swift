@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import SpeechTapDomain
 #if canImport(CoreAudio)
 import CoreAudio
@@ -6,6 +7,9 @@ import AudioToolbox
 #endif
 #if canImport(AppKit)
 import AppKit
+#endif
+#if canImport(os)
+import os
 #endif
 
 /// AudioSource 実装: Core Audio Process Tap（ADR-1）。
@@ -36,7 +40,21 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
         var ioProcID: AudioDeviceIOProcID?
         var continuation: AsyncStream<AudioFrame>.Continuation?
         var format: AudioStreamFormat = AudioStreamFormat(sampleRate: 48_000, channelCount: 2, isInterleaved: false)
+
+        /// 観測（リアルタイムスレッド安全）: IOProc 呼び出し回数と yield 済みフレーム数。
+        /// IOProc 内では atomic インクリメントのみ行い、Logger 呼び出しは最初の数回に間引く。
+        /// stop 時にサマリを出力して「IOProc が呼ばれたか / 何フレーム流したか」を判定可能にする。
+        let ioProcCallCount = Atomic<Int>(0)
+        let yieldedFrameCount = Atomic<Int>(0)
     }
+    #endif
+
+    #if canImport(os)
+    private let tapLog = AppLog.logger(.tap)
+    private let ioLog = AppLog.logger(.ioproc)
+    #endif
+
+    #if canImport(CoreAudio)
     private let lock = NSLock()
     private var state: TapState?
 
@@ -57,11 +75,20 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
         #if canImport(CoreAudio)
         // 1. PID 解決。AppId.rawValue が "pid:<n>" なら直接 PID、bundleId なら NSWorkspace で解決する。
         guard let pid = try resolvePID(for: app) else {
+            #if canImport(os)
+            tapLog.error("PID resolution failed for app=\(app.rawValue, privacy: .public)")
+            #endif
             throw NotImplemented.processTap
         }
+        #if canImport(os)
+        tapLog.info("start: app=\(app.rawValue, privacy: .public) resolved pid=\(pid)")
+        #endif
 
         // 2. PID → AudioObjectID（オーディオプロセスオブジェクト）。
         let processObjectID = try translatePIDToAudioObject(pid)
+        #if canImport(os)
+        tapLog.info("translated pid=\(pid) -> processObjectID=\(processObjectID)")
+        #endif
 
         // 3. CATapDescription（対象プロセスのみ＝非混入）。出力を素通しのままタップ（unmuted）。
         let tapDescription = CATapDescription(stereoMixdownOfProcesses: [processObjectID])
@@ -75,16 +102,41 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
             throw AudioTapError.tapCreationFailed(createStatus)
         }
 
+        #if canImport(os)
+        tapLog.info("tap created tapID=\(tapID)")
+        #endif
+
         // 5. タップの native format を取得（kAudioTapPropertyFormat → ASBD → AudioStreamFormat）。
         let asbd = try tapStreamDescription(tapID)
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
         let format = AudioStreamFormat(
             sampleRate: asbd.mSampleRate,
             channelCount: Int(asbd.mChannelsPerFrame),
-            isInterleaved: (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
+            isInterleaved: !isNonInterleaved
         )
+        #if canImport(os)
+        // 仮説 B 判定の核心: タップ native ASBD の全フィールドを記録する。
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        tapLog.info(
+            """
+            tap native ASBD: sampleRate=\(asbd.mSampleRate) \
+            channelsPerFrame=\(asbd.mChannelsPerFrame) \
+            formatFlags=0x\(String(asbd.mFormatFlags, radix: 16), privacy: .public) \
+            isFloat=\(isFloat) isNonInterleaved=\(isNonInterleaved) \
+            bitsPerChannel=\(asbd.mBitsPerChannel) \
+            bytesPerFrame=\(asbd.mBytesPerFrame) \
+            bytesPerPacket=\(asbd.mBytesPerPacket) \
+            framesPerPacket=\(asbd.mFramesPerPacket) \
+            formatID=\(asbd.mFormatID)
+            """
+        )
+        #endif
 
         // 6. タップを含む Aggregate Device を構成し、IOProc で PCM を受け取る。
         let aggregateID = try createAggregateDevice(tapUUID: tapDescription.uuid)
+        #if canImport(os)
+        tapLog.info("aggregate device created aggregateID=\(aggregateID)")
+        #endif
 
         let (stream, continuation) = AsyncStream.makeStream(of: AudioFrame.self)
 
@@ -102,6 +154,9 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
 
         // 8. デバイス開始。
         let startStatus = AudioDeviceStart(aggregateID, ioProcID)
+        #if canImport(os)
+        tapLog.info("AudioDeviceStart status=\(startStatus) (noErr=\(startStatus == noErr))")
+        #endif
         guard startStatus == noErr else {
             await stop()
             throw AudioTapError.deviceStartFailed(startStatus)
@@ -119,6 +174,13 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
     public func stop() async {
         #if canImport(CoreAudio)
         guard let s = takeState() else { return }
+        #if canImport(os)
+        // 観測サマリ: IOProc が何回呼ばれ、何フレーム yield したか。
+        // ここが 0 なら仮説 A（タップが無音 / IOProc 未呼び出し）が濃厚。
+        tapLog.info(
+            "stop summary: ioProcCalls=\(s.ioProcCallCount.load(ordering: .relaxed)) yieldedFrames=\(s.yieldedFrameCount.load(ordering: .relaxed))"
+        )
+        #endif
         if let ioProcID = s.ioProcID, s.aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) {
             AudioDeviceStop(s.aggregateDeviceID, ioProcID)
             AudioDeviceDestroyIOProcID(s.aggregateDeviceID, ioProcID)
@@ -216,12 +278,41 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
     private func registerIOProc(aggregateID: AudioObjectID, state: TapState) throws -> AudioDeviceIOProcID {
         // Unmanaged で TapState をコールバックへ渡す（リアルタイムスレッドで参照する）。
         let context = Unmanaged.passUnretained(state).toOpaque()
+        #if canImport(os)
+        // Logger は Sendable な値型。self を捕捉せず値コピーで渡す（リアルタイム安全）。
+        let ioLog = self.ioLog
+        #endif
         var ioProcID: AudioDeviceIOProcID?
         let status = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, nil) { _, inInputData, _, _, _ in
             // リアルタイムスレッド: コピーして yield するだけ。確保・ロック・ブロッキングをしない。
             let st = Unmanaged<TapState>.fromOpaque(context).takeUnretainedValue()
-            guard let continuation = st.continuation else { return }
+
+            // 観測（リアルタイム安全）: 呼び出し回数を atomic に加算する。
+            // Logger 呼び出しは最初の数回だけに間引く（リアルタイムスレッドで重い処理を避ける）。
+            let callIndex = st.ioProcCallCount.add(1, ordering: .relaxed).newValue
             let ablPointer = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
+
+            #if canImport(os)
+            if callIndex <= 3 {
+                // 仮説 A/B 判定の核心: バッファ構成（mNumberBuffers / 各チャンネル数・バイト数）を記録。
+                let numBuffers = ablPointer.count
+                let firstChannels = ablPointer.first?.mNumberChannels ?? 0
+                let firstBytes = ablPointer.first?.mDataByteSize ?? 0
+                let firstFloatCount = Int(firstBytes) / MemoryLayout<Float>.size
+                ioLog.info(
+                    """
+                    IOProc call #\(callIndex): mNumberBuffers=\(numBuffers) \
+                    first.mNumberChannels=\(firstChannels) \
+                    first.mDataByteSize=\(firstBytes) \
+                    computedFloatCount(first buffer)=\(firstFloatCount) \
+                    declaredFormat.channels=\(st.format.channelCount) \
+                    declaredFormat.interleaved=\(st.format.isInterleaved)
+                    """
+                )
+            }
+            #endif
+
+            guard let continuation = st.continuation else { return }
             guard let firstBuffer = ablPointer.first, let mData = firstBuffer.mData else { return }
             let floatCount = Int(firstBuffer.mDataByteSize) / MemoryLayout<Float>.size
             guard floatCount > 0 else { return }
@@ -233,6 +324,7 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
                 timestamp: Date().timeIntervalSinceReferenceDate
             )
             continuation.yield(frame)
+            st.yieldedFrameCount.add(1, ordering: .relaxed)
         }
         guard status == noErr, let ioProcID else {
             throw AudioTapError.ioProcCreationFailed(status)

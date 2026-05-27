@@ -17,6 +17,8 @@ public actor TranscriptionService {
     private let sink: TranscriptSink
     private let store: TranscriptStore
     private let locale: Locale
+    /// 観測点（OS 非依存の port）。既定は no-op。Composition Root で os.Logger 実装を注入する。
+    private let eventLogger: EventLogger
 
     /// 状態変化の通知（presentation の ViewModel が購読する想定）。
     private var onStateChange: (@Sendable (SessionState) -> Void)?
@@ -25,13 +27,19 @@ public actor TranscriptionService {
     private var generation: Int = 0
     private var recognitionTask: Task<Void, Never>?
 
+    /// 観測用カウンタ: domain が受信した認識結果数（volatile / finalized 別）。
+    /// 「running まで行くのに結果ゼロ」の切り分けで、domain まで結果が届いているかを判定する。
+    private var volatileCount: Int = 0
+    private var finalizedCount: Int = 0
+
     public init(
         audioSource: AudioSource,
         recognizer: SpeechRecognizer,
         permissionGate: PermissionGate,
         sink: TranscriptSink,
         store: TranscriptStore = TranscriptStore(),
-        locale: Locale
+        locale: Locale,
+        eventLogger: EventLogger = NullEventLogger()
     ) {
         self.audioSource = audioSource
         self.recognizer = recognizer
@@ -39,6 +47,7 @@ public actor TranscriptionService {
         self.sink = sink
         self.store = store
         self.locale = locale
+        self.eventLogger = eventLogger
     }
 
     public var transcriptStore: TranscriptStore { store }
@@ -48,6 +57,7 @@ public actor TranscriptionService {
     }
 
     private func transition(to newState: SessionState) {
+        eventLogger.log("state transition -> \(newState)")
         state = newState
         onStateChange?(newState)
     }
@@ -63,8 +73,10 @@ public actor TranscriptionService {
         transition(to: .checkingPermission(app))
 
         var status = permissionGate.currentStatus()
+        eventLogger.log("permission currentStatus=\(status)")
         if status == .undetermined {
             status = await permissionGate.request()
+            eventLogger.log("permission afterRequest=\(status)")
         }
 
         guard status == .granted else {
@@ -75,6 +87,7 @@ public actor TranscriptionService {
 
         do {
             let audioStream = try await audioSource.start(app: app)
+            eventLogger.log("audioSource.start succeeded for \(app.rawValue)")
             generation += 1
             let myGeneration = generation
             transition(to: .running(app))
@@ -113,6 +126,16 @@ public actor TranscriptionService {
             return
         }
         store.ingest(result)
+        // 観測: domain まで結果が届いているか（最初の数件 + 区切りで間引きログ）。
+        if result.isFinal {
+            finalizedCount += 1
+            eventLogger.log("recognition result #\(finalizedCount) finalized (len=\(result.text.count))")
+        } else {
+            volatileCount += 1
+            if volatileCount <= 3 || volatileCount % 20 == 0 {
+                eventLogger.log("recognition result volatile #\(volatileCount) (len=\(result.text.count))")
+            }
+        }
         if result.isFinal {
             // finalized のみ保存（取りこぼし防止・volatile は保存しない）。
             // 保存失敗は黙殺しない: 失敗時は error 状態へ遷移する。
@@ -129,6 +152,7 @@ public actor TranscriptionService {
     /// 即時 cancel で打ち切らない（finalize で正規に流す確定結果を取りこぼさないため）。
     public func stop() async {
         guard case .running(let app) = state else { return }
+        eventLogger.log("stop requested; received so far volatile=\(volatileCount) finalized=\(finalizedCount)")
         transition(to: .stopping(app))
 
         // 1. 認識器を finalize: 残りの volatile を確定へ昇格し、未配信 finalized を流し切ってストリームを終端する。
@@ -189,6 +213,7 @@ public actor TranscriptionService {
     /// 既に停止済み（世代更新後）なら無視する。
     private func failed(_ message: String, generation resultGeneration: Int?) async {
         if let resultGeneration, resultGeneration != generation { return }
+        eventLogger.error(message)
         switch state {
         case .stopped, .error:
             return

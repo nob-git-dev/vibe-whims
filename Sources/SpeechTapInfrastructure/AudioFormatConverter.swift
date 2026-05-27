@@ -3,6 +3,9 @@ import SpeechTapDomain
 #if canImport(AVFoundation)
 import AVFoundation
 #endif
+#if canImport(os)
+import os
+#endif
 
 /// AVAudioConverter による PCM → analyzer format 変換（ADR-3 / 必須前提）。
 /// タップの native format と SpeechAnalyzer の bestAvailableAudioFormat が一致する保証はないため独立化する。
@@ -14,6 +17,16 @@ import AVFoundation
 /// 実機検証項目: タップ native format の実値・変換後フォーマットの整合・サンプル欠落の有無。
 public struct AudioFormatConverter: Sendable {
     public init() {}
+
+    #if canImport(os)
+    /// 変換フォールバック発生回数（プロセス全体）。間引きログ用に最初の数回だけ記録する。
+    private static let fallbackCount = ManagedFallbackCounter()
+    final class ManagedFallbackCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n }
+    }
+    #endif
 
     /// domain 中立の native フレームを target フォーマットへ変換する（OS 型を domain に漏らさない境界）。
     /// AVFoundation が使えない環境ではパススルー（テスト・非 macOS 用）。
@@ -28,6 +41,19 @@ public struct AudioFormatConverter: Sendable {
         else {
             // 変換できない場合はサンプルをそのまま運び、フォーマットだけ target に揃える
             // （walking skeleton のフォールバック。実機では上の経路を通る）。
+            #if canImport(os)
+            // 仮説 B/C 判定: AVAudioConverter 経路が失敗してフォールバックに落ちたことを最初の数回だけ記録。
+            let c = Self.fallbackCount.next()
+            if c <= 3 {
+                AppLog.logger(.converter).error(
+                    """
+                    convert FALLBACK #\(c) (AVAudioConverter path failed): \
+                    in[sr=\(frame.format.sampleRate) ch=\(frame.format.channelCount) il=\(frame.format.isInterleaved) samples=\(frame.samples.count)] \
+                    target[sr=\(target.sampleRate) ch=\(target.channelCount) il=\(target.isInterleaved)]
+                    """
+                )
+            }
+            #endif
             return AudioFrame(samples: frame.samples, format: target, timestamp: frame.timestamp)
         }
         return Self.audioFrame(from: converted, format: target, timestamp: frame.timestamp)
