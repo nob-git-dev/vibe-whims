@@ -124,7 +124,6 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable 
                         continuation.finish(throwing: NotImplemented.speechAnalyzer)
                         return
                     }
-                    let targetFormat = AudioFormatConverter.streamFormat(from: analyzerFormat)
                     #if canImport(os)
                     log.info(
                         """
@@ -155,8 +154,15 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable 
                     let feeder = Task {
                         for await frame in audio {
                             let n = feedReceived.add(1, ordering: .relaxed).newValue
-                            let converted = converter.convert(frame, to: targetFormat)
-                            if let buffer = AudioFormatConverter.pcmBuffer(from: converted, format: analyzerFormat) {
+                            // タップ native フォーマット（例: 48kHz/2ch/float32/インターリーブ）の AudioFrame を
+                            // その native フォーマットの AVAudioPCMBuffer に詰め、analyzerFormat（Int16 等）へ
+                            // 直接変換する。floatChannelData 前提をやめ Int16 ターゲットでも破棄しない（バグ修正）。
+                            let sourceFormat = AudioFormatConverter.avFormat(from: frame.format)
+                            let sourceBuffer = sourceFormat.flatMap {
+                                AudioFormatConverter.pcmBuffer(from: frame, format: $0)
+                            }
+                            if let sourceBuffer,
+                               let buffer = converter.convertBuffer(sourceBuffer, to: analyzerFormat) {
                                 inputCont.yield(AnalyzerInput(buffer: buffer))
                                 let y = feedConverted.add(1, ordering: .relaxed).newValue
                                 #if canImport(os)

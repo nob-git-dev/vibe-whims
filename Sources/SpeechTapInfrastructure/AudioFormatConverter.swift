@@ -18,67 +18,27 @@ import os
 public struct AudioFormatConverter: Sendable {
     public init() {}
 
-    #if canImport(os)
-    /// 変換フォールバック発生回数（プロセス全体）。間引きログ用に最初の数回だけ記録する。
-    private static let fallbackCount = ManagedFallbackCounter()
-    final class ManagedFallbackCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var n = 0
-        func next() -> Int { lock.lock(); defer { lock.unlock() }; n += 1; return n }
-    }
-    #endif
-
-    /// domain 中立の native フレームを target フォーマットへ変換する（OS 型を domain に漏らさない境界）。
-    /// AVFoundation が使えない環境ではパススルー（テスト・非 macOS 用）。
-    public func convert(_ frame: AudioFrame, to target: AudioStreamFormat) -> AudioFrame {
-        #if canImport(AVFoundation)
-        guard
-            let sourceFormat = Self.avFormat(from: frame.format),
-            let targetFormat = Self.avFormat(from: target),
-            let sourceBuffer = Self.pcmBuffer(from: frame, format: sourceFormat),
-            let converter = AVAudioConverter(from: sourceFormat, to: targetFormat),
-            let converted = Self.convert(sourceBuffer, using: converter, to: targetFormat)
-        else {
-            // 変換できない場合はサンプルをそのまま運び、フォーマットだけ target に揃える
-            // （walking skeleton のフォールバック。実機では上の経路を通る）。
-            #if canImport(os)
-            // 仮説 B/C 判定: AVAudioConverter 経路が失敗してフォールバックに落ちたことを最初の数回だけ記録。
-            let c = Self.fallbackCount.next()
-            if c <= 3 {
-                AppLog.logger(.converter).error(
-                    """
-                    convert FALLBACK #\(c) (AVAudioConverter path failed): \
-                    in[sr=\(frame.format.sampleRate) ch=\(frame.format.channelCount) il=\(frame.format.isInterleaved) samples=\(frame.samples.count)] \
-                    target[sr=\(target.sampleRate) ch=\(target.channelCount) il=\(target.isInterleaved)]
-                    """
-                )
-            }
-            #endif
-            return AudioFrame(samples: frame.samples, format: target, timestamp: frame.timestamp)
-        }
-        return Self.audioFrame(from: converted, format: target, timestamp: frame.timestamp)
-        #else
-        return AudioFrame(samples: frame.samples, format: target, timestamp: frame.timestamp)
-        #endif
-    }
-
     #if canImport(AVFoundation)
-    /// AudioStreamFormat → AVAudioFormat（float32）。
+    /// source の AVAudioPCMBuffer を target フォーマット（commonFormat は Int16 / Float32 等）の
+    /// AVAudioPCMBuffer へ直接変換する（ADR-3）。
+    ///
+    /// 重要: 出力バッファは **target フォーマットで確保**する。AVAudioConverter は出力バッファの
+    /// フォーマットに合わせて書き込むため、floatChannelData 前提（旧バグ）をやめ、
+    /// Int16 等の commonFormat でも取りこぼさず変換できる。
+    /// SpeechAnalyzer の analyzerFormat（Int16/16kHz/モノ 等）をそのまま target に渡せばよい。
+    public func convertBuffer(_ source: AVAudioPCMBuffer, to target: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let converter = AVAudioConverter(from: source.format, to: target) else { return nil }
+        return Self.convert(source, using: converter, to: target)
+    }
+
+    /// AudioStreamFormat（タップ native などの domain 中立フォーマット）→ AVAudioFormat（float32）。
+    /// タップは float32 PCM を供給するため source 側は float32 で表現する。
     static func avFormat(from format: AudioStreamFormat) -> AVAudioFormat? {
         AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: format.sampleRate,
             channels: AVAudioChannelCount(max(1, format.channelCount)),
             interleaved: format.isInterleaved
-        )
-    }
-
-    /// AVAudioFormat → AudioStreamFormat（domain 中立）。
-    static func streamFormat(from format: AVAudioFormat) -> AudioStreamFormat {
-        AudioStreamFormat(
-            sampleRate: format.sampleRate,
-            channelCount: Int(format.channelCount),
-            isInterleaved: format.isInterleaved
         )
     }
 
@@ -109,28 +69,6 @@ public struct AudioFormatConverter: Sendable {
             }
         }
         return buffer
-    }
-
-    /// AVAudioPCMBuffer → AudioFrame（[Float] サンプル）。
-    static func audioFrame(from buffer: AVAudioPCMBuffer, format: AudioStreamFormat, timestamp: Double) -> AudioFrame {
-        guard let channelData = buffer.floatChannelData else {
-            return AudioFrame(samples: [], format: format, timestamp: timestamp)
-        }
-        let channels = Int(buffer.format.channelCount)
-        let n = Int(buffer.frameLength)
-        var samples = [Float]()
-        samples.reserveCapacity(n * channels)
-        if buffer.format.isInterleaved {
-            let src = channelData[0]
-            samples.append(contentsOf: UnsafeBufferPointer(start: src, count: n * channels))
-        } else {
-            for i in 0..<n {
-                for ch in 0..<channels {
-                    samples.append(channelData[ch][i])
-                }
-            }
-        }
-        return AudioFrame(samples: samples, format: format, timestamp: timestamp)
     }
 
     /// AVAudioConverter で 1 バッファを変換する。

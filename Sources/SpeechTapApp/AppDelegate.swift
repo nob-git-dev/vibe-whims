@@ -48,6 +48,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self?.onStateChanged(state)
                     }
                 }
+                // running 中にストリーミングで届く volatile/finalized を表示へリアルタイム反映する。
+                // 状態変化時だけでなく、結果更新のたびに updateTranscriptWindow を呼ぶ（Fix2）。
+                await service.setTranscriptUpdateHandler { [weak self] in
+                    DispatchQueue.main.async {
+                        self?.updateTranscriptWindow()
+                    }
+                }
             }
         } catch {
             latestStateText = "config error: \(error)"

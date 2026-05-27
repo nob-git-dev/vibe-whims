@@ -33,6 +33,37 @@ struct TranscriptionServiceTests {
         #expect(state == .selected(AppId("com.example.app")))
     }
 
+    /// Fix2: running 中にストリーミングで届く volatile/finalized を UI に反映するための通知。
+    /// domain は UI に依存しないが、結果受信時にハンドラ（port/クロージャ）を呼ぶことを担保する
+    /// （presentation はこれを購読して updateTranscriptWindow をメインスレッドで呼ぶ）。
+    @Test("文字起こし結果を受信するたびに transcript 更新ハンドラが呼ばれる（リアルタイム表示更新）")
+    func transcriptUpdateHandlerIsCalledOnEachResult() async {
+        final class Counter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var n = 0
+            func bump() { lock.lock(); n += 1; lock.unlock() }
+            var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+        }
+        let counter = Counter()
+        let results = [
+            RecognitionResult(text: "こん", isFinal: false),
+            RecognitionResult(text: "こんにちは。", isFinal: true),
+            RecognitionResult(text: "げ", isFinal: false)
+        ]
+        let service = makeService(
+            permission: FakePermissionGate(initial: .granted),
+            audio: FakeAudioSource(frames: [.dummy()]),
+            recognizer: FakeSpeechRecognizer(results: results),
+            sink: SpyTranscriptSink()
+        )
+        await service.setTranscriptUpdateHandler { counter.bump() }
+        let app = AppId("com.example.app")
+        await service.start(app: app)
+        await service.stop()
+        // 3 件の結果それぞれで少なくとも 1 回はハンドラが呼ばれる。
+        #expect(counter.value >= results.count)
+    }
+
     /// 受け入れ条件「未許可のまま音声取得を開始しない」を守る最重要テスト。
     @Test("権限 denied のとき running に進まず awaitingPermission になる（未許可のまま開始しない）")
     func deniedDoesNotStartAndGoesAwaitingPermission() async {

@@ -23,6 +23,11 @@ public actor TranscriptionService {
     /// 状態変化の通知（presentation の ViewModel が購読する想定）。
     private var onStateChange: (@Sendable (SessionState) -> Void)?
 
+    /// 文字起こし結果が更新されたことの通知（presentation が購読し UI を更新する想定）。
+    /// running 中にストリーミングで届く volatile/finalized を画面へリアルタイム反映するための port。
+    /// domain は UI に依存せず、クロージャ経由で通知するだけ（onStateChange と同じ流儀）。
+    private var onTranscriptUpdate: (@Sendable () -> Void)?
+
     /// running になった世代。stop 後に到着した結果を破棄するためのガード。
     private var generation: Int = 0
     private var recognitionTask: Task<Void, Never>?
@@ -54,6 +59,11 @@ public actor TranscriptionService {
 
     public func setStateChangeHandler(_ handler: @escaping @Sendable (SessionState) -> Void) {
         self.onStateChange = handler
+    }
+
+    /// 文字起こし結果更新の通知ハンドラを登録する（presentation が UI 更新のために購読する）。
+    public func setTranscriptUpdateHandler(_ handler: @escaping @Sendable () -> Void) {
+        self.onTranscriptUpdate = handler
     }
 
     private func transition(to newState: SessionState) {
@@ -126,6 +136,8 @@ public actor TranscriptionService {
             return
         }
         store.ingest(result)
+        // 結果が更新されたことを presentation に通知し、UI をリアルタイム反映させる（Fix2）。
+        onTranscriptUpdate?()
         // 観測: domain まで結果が届いているか（最初の数件 + 区切りで間引きログ）。
         if result.isFinal {
             finalizedCount += 1
