@@ -13,7 +13,8 @@ let package = Package(
     ],
     products: [
         .library(name: "SpeechTapDomain", targets: ["SpeechTapDomain"]),
-        .library(name: "SpeechTapInfrastructure", targets: ["SpeechTapInfrastructure"])
+        .library(name: "SpeechTapInfrastructure", targets: ["SpeechTapInfrastructure"]),
+        .executable(name: "SpeechTapApp", targets: ["SpeechTapApp"])
     ],
     targets: [
         // domain: 純粋ロジック。Foundation 以外・OS API・UI に依存しない。
@@ -24,6 +25,29 @@ let package = Package(
         .target(
             name: "SpeechTapInfrastructure",
             dependencies: ["SpeechTapDomain"]
+        ),
+        // presentation + Composition Root（ADR-2）。
+        // メニューバー常駐 UI を持ち、infrastructure の具体 Adapter を生成して domain に注入する。
+        // OS/UI（AppKit）に依存してよい層。依存方向は外→内（presentation → infra → domain）のまま。
+        .executableTarget(
+            name: "SpeechTapApp",
+            dependencies: ["SpeechTapDomain", "SpeechTapInfrastructure"],
+            // Info.plist は -sectcreate でバイナリに埋め込むため、リソース複製対象から除外する
+            // （unhandled 警告も消える）。config.default.conf はバンドルへ複製する。
+            exclude: ["Resources/Info.plist"],
+            resources: [
+                .copy("Resources/config.default.conf")
+            ],
+            linkerSettings: [
+                // NSAudioCaptureUsageDescription を含む Info.plist を実行ファイルに埋め込む
+                // （TCC ダイアログを正しく出すため。Hardened Runtime / 署名は /deploy で詰める）。
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/SpeechTapApp/Resources/Info.plist"
+                ])
+            ]
         ),
         // domain のユニットテスト。fake/stub port を注入して OS なしで検証する。
         .testTarget(

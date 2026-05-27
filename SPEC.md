@@ -597,5 +597,108 @@ domain 境界で構造的に担保できない点を Must とする。
 - 実機検証が必要な項目を「テスト済み」と偽らず、手動検証項目として漏れなく明記している（誠実なテスト範囲申告）。
 
 
+## 実装メモ（walking skeleton）
+<!-- /tdd（walking skeleton フェーズ）が追記。2026-05-27 -->
+
+### 目的と性質
+
+「対象アプリの音声をタップ → SpeechAnalyzer で文字化 → 表示」という最大リスク経路を
+実機で早期に貫通・検証可能にするための最小 end-to-end 骨組み。
+**Core Audio Process Tap と SpeechAnalyzer の実装は実機・権限・実音声がないと検証できない**ため、
+本フェーズは「コンパイル成功 + 実機起動可能 + 手動検証チェックリスト」で担保する。
+OS 実装部分を「テスト済み」とは扱わない（誠実なテスト範囲申告）。domain の既存 22 テストは引き続き全 PASS。
+
+### 実装したコンポーネント
+
+**presentation + Composition Root（新規 executable target `SpeechTapApp`）**
+- `Sources/SpeechTapApp/main.swift`: `NSApplication.accessory` でメニューバー常駐（Dock 非表示）。
+- `Sources/SpeechTapApp/AppDelegate.swift`: **Composition Root（ADR-2）**。
+  config を外部ファイルから読み（`~/.config/speech-tap/config.conf` → バンドル同梱 `config.default.conf` の順）、
+  infrastructure の具体 Adapter（`ProcessTapAudioSource` / `SpeechAnalyzerAdapter` / `AudioCapturePermission`
+  / `FileTranscriptSink` / `RunningAppProvider`）を生成して `TranscriptionService` に port 注入する。
+  メニューバー UI: (a) 対象アプリ選択（一覧）, (b) 開始/停止, (c) 文字起こし表示, (d) 権限未許可案内ダイアログ
+  （`awaitingPermission` でシステム設定への導線を提示）。`@MainActor` 注釈で UI スレッド安全。
+- `Sources/SpeechTapApp/TranscriptWindowController.swift`: 文字起こし表示ウィンドウ（finalized + volatile をグレー表示）。
+- `Sources/SpeechTapApp/Resources/Info.plist`: `NSAudioCaptureUsageDescription` / `LSUIElement=true` を設定。
+  `-sectcreate __TEXT __info_plist` リンカフラグでバイナリに埋め込み（`otool -P` で埋め込み確認済み）。
+
+**infrastructure（実 OS 実装。最小だが実際に OS API を叩く）**
+- `RunningAppProvider`(AppEnumerator): `NSWorkspace.runningApplications` で `.regular` アプリを列挙し、
+  PID を持つ `TargetApp` に変換。`AppId.rawValue = bundleId`（config の TARGET_APP_ID と突き合わせ可能）。
+- `AudioCapturePermission`(PermissionGate): **私的 TCC API 非依存**。グローバルタップ（mute・private）の
+  `AudioHardwareCreateProcessTap` 試行の戻り値で granted/denied を判定（SPEC「### TCC 権限」(a)(b) 方針）。
+  初回試行で OS が音声キャプチャ権限ダイアログを表示する想定。画面収録・マイク権限は要求しない。
+- `ProcessTapAudioSource`(AudioSource): PID → `kAudioHardwarePropertyTranslatePIDToProcessObject` で AudioObjectID →
+  **`CATapDescription(stereoMixdownOfProcesses: [対象のみ])`（= 非混入を構造的に担保）** → `AudioHardwareCreateProcessTap`
+  → private Aggregate Device（対象タップのみを sub-tap に持つ）→ `AudioDeviceCreateIOProcIDWithBlock` で IOProc 登録。
+  **I/O コールバック（リアルタイムスレッド）はサンプルをコピーして `AsyncStream` に yield するだけ**（確保・ロック・ブロッキングをしない）。
+  native format は `kAudioTapPropertyFormat`（ASBD）→ `AudioStreamFormat` に正規化。stop でタップ/集約デバイス/IOProc を解放。
+- `AudioFormatConverter`: `AVAudioConverter` で native format → analyzer の `bestAvailableAudioFormat` へ実変換。
+  `AudioFrame ⇔ AVAudioPCMBuffer` の相互変換（OS 型を domain に漏らさない境界）。
+- `SpeechAnalyzerAdapter`(SpeechRecognizer): macOS 26 の `SpeechTranscriber`（`reportingOptions: [.volatileResults]`）+
+  `SpeechAnalyzer` を使用。`AssetInventory.assetInstallationRequest` で言語モデルを必要に応じ導入（オンデバイス）。
+  `AudioFrame → AnalyzerInput` を `AsyncStream` で供給、`transcriber.results` の `isFinal` で volatile/finalized を区別し
+  `RecognitionResult` に正規化して `AsyncThrowingStream` で流す。`finalize()` は入力終端 +
+  `analyzer.finalizeAndFinishThroughEndOfInput()` で最後の確定まで流し切る（ADR-3）。
+  異常終了は `continuation.finish(throwing:)` で domain に伝播（error 状態遷移を駆動）。**ネットワーク送信コードを持たない**。
+- `InfraErrors.swift`: `NotImplemented` に加え、Process Tap 構成失敗を表す `AudioTapError`（OSStatus 保持）。
+
+### ビルド / 起動手順
+
+```sh
+# domain ユニットテスト（22 tests / 5 suites 全 PASS を維持）
+swift test
+
+# 警告ゼロ確認（クリーンビルド）
+swift build -Xswiftc -strict-concurrency=complete   # → Build complete!（警告ゼロ）
+
+# walking skeleton 起動（メニューバー常駐。Dock には出ない）
+swift build
+.build/debug/SpeechTapApp
+# メニューバーの 🎙 アイコンから: アプリ一覧更新 → 対象選択 → 「文字化を開始」。
+# 設定は ~/.config/speech-tap/config.conf を作れば優先（無ければ同梱 config.default.conf を使用）。
+```
+
+> 注: SPM の bare executable では TCC ダイアログ・署名が不安定な場合がある。
+> Hardened Runtime / 署名 / .app バンドル化は /deploy で詰める（Info.plist の `NSAudioCaptureUsageDescription` は埋め込み済み）。
+
+### 実施した検証（このフェーズで確認できた範囲）
+
+- `swift build` 成功 / `swift build -Xswiftc -strict-concurrency=complete` クリーンビルドで**警告ゼロ**。
+- `swift test`: domain 既存 **22 tests / 5 suites 全 PASS**（macOS 26.5 / Swift 6.3.2）。`ArchitectureGuardTests` も PASS（domain は OS/UI 非 import を維持）。
+- 実行ファイルに Info.plist（`NSAudioCaptureUsageDescription`）が埋め込まれていることを `otool -P` で確認。
+- アプリを起動し、**メニューバー常駐プロセスとして起動・常駐し続ける**ことを確認（早期 exit / クラッシュ無し）。
+
+### 手動検証チェックリスト（実機で人間が確認する。ユニットテスト不能）
+
+実際に音声を出すアプリ（例: ブラウザで動画再生）を用意し、以下を順に確認する:
+
+1. [ ] **メニューバー常駐**: 起動すると🎙アイコンがメニューバーに出る。Dock には出ない（`LSUIElement`/accessory）。
+2. [ ] **アプリ一覧**: メニューの「アプリ一覧を更新」で起動中アプリが一覧表示され、選択でチェックが付く。
+3. [ ] **権限ダイアログ**: 「文字化を開始」で音声キャプチャ権限ダイアログが出る（画面収録/マイクは要求されない）。
+       拒否すると「権限未許可」案内ダイアログ + システム設定への導線が出て、**音声取得を開始しない**。
+4. [ ] **文字化**: 対象アプリ（動画再生中のブラウザ等）を選び開始すると、「文字起こしを表示」ウィンドウに
+       テキストがリアルタイム更新される（volatile はグレー、finalized は通常色）。
+5. [ ] **【最重要】非混入**: 対象アプリ以外（別アプリの音声・マイク・システム音）が**文字化結果に混入しない**こと。
+       例: 対象をブラウザにし、別アプリで音楽を鳴らしても、その音楽の内容は文字化されない。
+6. [ ] **停止後不追記**: 「文字化を停止」後、対象アプリが音を出し続けても新たなテキストが追記されない。
+7. [ ] **保存**: 停止後、`OUTPUT_PATH`（既定 `~/Documents/speech-tap/transcript.txt`）に確定テキストが保存される。
+
+### 実機検証で未解決の事項（決め打ちせず実機で確定する）
+
+- **権限ダイアログが SPM bare executable で正しく出るか**。`AudioCapturePermission` の granted/denied 判定が
+  公開 API の戻り値だけで実用的に成立するか（undetermined と denied の厳密な区別は公開 API では困難。実機で挙動確定）。
+  → 署名・Hardened Runtime・.app バンドル化が必要なら /deploy で対応。
+- **タップ native format の実値**（サンプルレート/チャンネル/float/interleaved）。`AudioFormatConverter` の
+  `bestAvailableAudioFormat` への変換が正しいか。フォーマット差で無音・歪みが出ないか。
+- **【最重要】非混入の実機確認**（上記チェックリスト 5）。`CATapDescription(stereoMixdownOfProcesses:)` で
+  対象プロセスのみがタップされ、他アプリ・マイク・システム音が混入しないこと。
+- **対象アプリが複数プロセスに分かれる場合**（例: ブラウザのヘルパープロセスが音を出す）の挙動。
+- **SpeechAnalyzer がオンデバイスで実際に文字化するか**。言語モデル導入フロー（`assetInstallationRequest`）の成否。
+  volatile/finalized が想定通り流れるか。
+- **I/O コールバックでのドロップアウト**（リアルタイムスレッドでの `Array` コピー・`continuation.yield` の負荷）。
+  実機で長時間・高負荷時にオーディオドロップアウトが出ないか。出る場合はロックフリーリングバッファ化を検討。
+- **音量減衰など Process Tap 既知の癖**（フォーラム報告）の有無。
+
 ## デプロイ計画
 <!-- /deploy が追記 -->
