@@ -701,4 +701,133 @@ swift build
 - **音量減衰など Process Tap 既知の癖**（フォーラム報告）の有無。
 
 ## デプロイ計画
-<!-- /deploy が追記 -->
+<!-- /deploy が追記。2026-05-28 -->
+
+### 性質（このフェーズは何か）
+
+外部サーバへの本番デプロイではなく、**ローカル macOS アプリのビルド・.app バンドル化・ad-hoc 署名・起動可能化**である。
+目的は、ユーザーが実機で起動して TCC（音声キャプチャ）権限を付与し、手動検証（特に**最重要 = 非混入**）を実行できる状態にすること。
+不可逆操作（`rm -rf` 等）はスクリプトの生成物 `build/SpeechTap.app` に限定し、ソース・ユーザーデータには触れない。
+
+### ビルド / .app バンドル化 / 署名手順
+
+成果物スクリプト: **`scripts/make_app.sh`**（リポジトリルートで実行）。
+
+```sh
+# domain ユニットテスト（22 tests / 5 suites 全 PASS を維持）
+swift test
+
+# release ビルド → build/SpeechTap.app 生成 → ad-hoc 署名 → 検証
+scripts/make_app.sh
+# 生成して即起動する場合:
+OPEN=1 scripts/make_app.sh
+```
+
+`make_app.sh` の処理（5 ステップ）:
+1. `swift build -c release`。`--show-bin-path` で実行ファイル `SpeechTapApp` を解決。
+2. `.app` バンドル構造を構築:
+   - `Contents/MacOS/SpeechTapApp`（実行ファイル）
+   - `Contents/Info.plist`（`Sources/SpeechTapApp/Resources/Info.plist` を配置。**.app では Contents/Info.plist が正本**。
+     バイナリの `-sectcreate __TEXT __info_plist` 埋め込みは bare executable 用の保険として併存）
+   - `Contents/Resources/config.default.conf`（既定設定フォールバック。`Bundle.main.path(forResource:)` が
+     .app では `Contents/Resources/` を探索するためここに配置。これにより config 解決が .app でも成立）
+   - `Contents/PkgInfo`（`APPL????`）
+3. entitlements 生成（`build/SpeechTap.entitlements`）: `com.apple.security.device.audio-input` のみ（音声キャプチャ最小）。
+4. **ad-hoc 署名**: `codesign --force --sign - --entitlements ... --identifier com.example.speech-tap`。
+   **Hardened Runtime は付けない**（`--options runtime` 不使用）。ローカル実機検証用には ad-hoc + バンドル識別で
+   TCC の関連付けは成立する。Developer ID 配布する場合のみ runtime + notarization を将来検討。
+5. 検証: `codesign --verify`、entitlements ダンプ、Info.plist 主要キー表示、
+   **画面収録/マイク権限キーが Info.plist に無いことを明示チェック（固定要件・あれば exit 1）**。
+
+#### Info.plist の主要キー（確認済み）
+
+| キー | 値 | 目的 |
+|---|---|---|
+| `CFBundleIdentifier` | `com.example.speech-tap` | バンドル識別（TCC/LaunchServices の同一性） |
+| `CFBundleExecutable` | `SpeechTapApp` | MacOS/ 配下の実行ファイル名と一致 |
+| `LSUIElement` | `true` | メニューバー常駐・Dock 非表示 |
+| `LSMinimumSystemVersion` | `26.0` | macOS 26+ 前提（固定要件） |
+| `NSAudioCaptureUsageDescription` | （説明文あり） | 音声キャプチャ権限ダイアログの説明 |
+| `NSScreenCaptureUsageDescription` | **未設定** | 画面収録権限を要求しない（固定要件） |
+| `NSMicrophoneUsageDescription` | **未設定** | マイク権限を要求しない（固定要件・スコープ外） |
+
+#### 機密情報の扱い
+
+ad-hoc 署名は証明書・秘密鍵を一切使わない。`.gitignore` で `build/`・`*.app`・`*.entitlements` を除外し、
+署名成果物・生成 entitlements をコミットしない。`config.conf`/`*.env`（実設定）も既存 `.gitignore` で除外済み。
+
+### ロールバック / クリーンアップ手順
+
+本フェーズはローカルビルドのため「ロールバック」は成果物の削除と権限リセットで原状復帰できる。
+
+| 操作 | コマンド | 備考 |
+|---|---|---|
+| .app 成果物の削除 | `rm -rf build/SpeechTap.app build/SpeechTap.entitlements` | 生成物のみ。ソースに影響なし |
+| ビルドディレクトリ削除 | `rm -rf .build build` | クリーンビルドへ戻す |
+| TCC 権限のリセット（音声キャプチャ） | `tccutil reset AudioCapture com.example.speech-tap` | 次回起動時に再度ダイアログが出る状態へ |
+| TCC 権限の全リセット（最終手段） | `tccutil reset AudioCapture` | 全アプリの音声キャプチャ許可をリセット（影響範囲大・要注意） |
+| アプリ削除での原状復帰 | `build/SpeechTap.app` を削除 | 常駐プロセス・設定（`~/.config/speech-tap/`）・出力（`OUTPUT_PATH`）以外に OS 改変は無い |
+
+> 不可逆操作（`rm -rf` / `tccutil reset`）はユーザーの明示同意のもとで実行する（自己判断で実行しない）。
+
+### 実機検証 runbook（最重要の成果物・ユーザーが実機で実行）
+
+事前準備: 音声を出すアプリ（例: ブラウザで動画再生）を 1 つ用意。別途「混入確認用」に音楽再生アプリ等をもう 1 つ用意。
+
+| # | 手順 | 期待結果 | 失敗時の切り分け |
+|---|---|---|---|
+| 1 | `swift test` | 22 tests / 5 suites 全 PASS | 失敗時は domain 回帰。実装フェーズへ差し戻し |
+| 2 | `scripts/make_app.sh` | `build/SpeechTap.app` 生成、`codesign --verify` valid、画面収録/マイクキー無し確認 | 署名失敗→codesign エラー文確認。Info.plist キー欠落→`Sources/.../Info.plist` 修正 |
+| 3 | `open build/SpeechTap.app` | メニューバーに 🎙 アイコンが出る。**Dock には出ない**（`LSUIElement`/accessory） | アイコンが出ない→`Console.app` でクラッシュ/early exit 確認。config error ダイアログが出たら設定解決失敗 |
+| 4 | メニュー →「アプリ一覧を更新」 | 起動中アプリが一覧表示される | 空のまま→`RunningAppProvider`（`NSWorkspace.runningApplications`）の挙動確認 |
+| 5 | 一覧から対象アプリ（動画再生中のブラウザ等）を選択 | 選択にチェックが付く | — |
+| 6 | 「文字化を開始」 | **音声キャプチャ権限ダイアログが出る**（画面収録/マイクは出ない）。許可で文字化開始 | **ダイアログが出ない**→未解決事項参照（.app+署名でも出ない場合は Hardened Runtime 付与や Developer ID 署名を検討）。`tccutil reset AudioCapture com.example.speech-tap` で再試行 |
+| 7 | 権限を**拒否**して再度「文字化を開始」 | 「権限未許可」案内ダイアログ + システム設定への導線。**音声取得を開始しない**（黙って無音にならない） | 無音で進む→`AudioCapturePermission` の granted/denied 判定が公開 API で成立していない（未解決事項） |
+| 8 | 権限許可後、対象アプリで動画を再生し「文字起こしを表示」 | テキストがリアルタイム更新（volatile=グレー、finalized=通常色） | 無音/文字化されない→native format 不一致（`AudioFormatConverter`）/ SpeechAnalyzer 言語モデル未導入（`assetInstallationRequest`） |
+| 9 | **【最重要】非混入**: 対象=ブラウザのまま、別アプリで音楽を鳴らす | 別アプリ（音楽）の内容は**文字化結果に混入しない**。対象アプリの音声のみが文字化される | 混入する→`CATapDescription(stereoMixdownOfProcesses:)` が対象プロセスのみに限定できていない。ブラウザのヘルパープロセス分離も確認 |
+| 10 | 「文字化を停止」後、対象アプリが音を出し続ける | **新たなテキストが追記されない**（停止後不追記） | 追記される→domain の世代ガード/stop フロー回帰（実装フェーズ差し戻し） |
+| 11 | 停止後、`OUTPUT_PATH`（既定 `~/Documents/speech-tap/transcript.txt`）を確認 | 確定（finalized）テキストが保存されている | 保存されない→`FileTranscriptSink` の出力先・権限。親ディレクトリは自動作成される設計 |
+
+### 受け入れ条件の照合結果
+
+ビルド・バンドル・起動可能化フェーズで**自動/起動レベルで確認できたもの**と、**実機・人間の操作・実音声が必要で未確認のもの**を正直に分離する。
+
+#### 自動/起動レベルで確認済み
+
+- [x] **`swift test` 22 tests / 5 suites 全 PASS**（macOS 26.5 / Swift 6.3.2）— 確認済み（domain 回帰なし）。
+- [x] **`swift build -c release` 成功** — `Build complete!` 確認済み。
+- [x] **`scripts/make_app.sh` で `build/SpeechTap.app` 生成** — 確認済み。
+- [x] **`codesign --verify` valid / Designated Requirement 充足** — 確認済み（ad-hoc 署名）。
+- [x] **entitlements = `com.apple.security.device.audio-input` のみ** — `codesign -d --entitlements` で確認済み。
+- [x] **Info.plist 主要キー**（`CFBundleIdentifier`/`CFBundleExecutable`/`LSUIElement=true`/`LSMinimumSystemVersion=26.0`/`NSAudioCaptureUsageDescription`）— 確認済み。
+- [x] **画面収録/マイク権限キーが Info.plist に無い（固定要件）** — `NSScreenCaptureUsageDescription`・`NSMicrophoneUsageDescription` 未設定を明示チェック（make_app.sh が検証、あれば exit 1）。確認済み。
+- [x] **メニューバー常駐プロセスとして起動・常駐（早期 exit/クラッシュ無し）** — 実行ファイルを起動し 5 秒間 resident を確認、エラー出力なし。
+- [x] **設定の外部化（config 解決が .app で成立）** — `Contents/Resources/config.default.conf` を配置し `Bundle.main.path` で解決可能。起動時に config error ダイアログが出ないことを確認。
+- [x] **オンデバイス完結（ネットワーク送信コードを持たない）** — 設計・実装方針で担保（infrastructure に送信コード無し）。実音声での最終確認は実機項目。
+
+#### 実機・人間の操作が必要で未確認（runbook の手動検証で確定する）
+
+- [ ] **メニューバーに 🎙 アイコンが表示され Dock に出ない**（GUI 目視。プロセス常駐は確認済みだがアイコン表示は実機目視が必要）— runbook #3。
+- [ ] **対象アプリを一覧から選択できる** — runbook #4-5。
+- [ ] **対象アプリの音声がリアルタイムで文字表示される（実用的遅延）** — runbook #8。実音声・SpeechAnalyzer 動作が必要。
+- [ ] **【最重要】対象アプリ以外の音声が文字化結果に混入しない** — runbook #9。実音声・複数アプリが必要。**本仕様の最重要本質**。
+- [ ] **停止でき、停止後は追記されない** — runbook #10（domain ロジックはテスト済みだが実音声経路での最終確認は実機）。
+- [ ] **確定結果が `OUTPUT_PATH` に保存される** — runbook #11（`FileTranscriptSink` はテスト済みだが実経路での最終確認は実機）。
+- [ ] **権限ダイアログが実機で出る/未許可時に開始しない** — runbook #6-7。**.app バンドル + ad-hoc 署名でダイアログが出るかは未解決事項（下記）**。
+
+### 未解決の実機検証項目（決め打ちせず実機で確定する）
+
+- **権限ダイアログが .app バンドル + ad-hoc 署名で正しく出るか**: skeleton では「SPM bare executable では TCC ダイアログが不安定」と未解決だった。
+  本フェーズで .app バンドル化 + バンドル識別 + ad-hoc 署名（audio-input entitlement）まで整えたが、
+  **実際にダイアログが表示されるかは実機・実権限フローでのみ確定できる**。出ない場合の対応候補:
+  (a) Hardened Runtime を付けて再署名（`codesign --options runtime`）、(b) Developer ID 署名、
+  (c) `tccutil reset AudioCapture com.example.speech-tap` 後に再試行。実機結果で確定する。
+- **`AudioCapturePermission` の granted/denied 判定が公開 API の戻り値だけで実用的に成立するか**（undetermined と denied の厳密な区別は公開 API では困難。私的 TCC API 非依存方針を維持）。
+- **タップ native format の実値**（サンプルレート/チャンネル/float/interleaved）と `AudioFormatConverter` の `bestAvailableAudioFormat` 変換の正しさ（無音・歪み・音量減衰）。
+- **【最重要】非混入の実機確認**（runbook #9）。`CATapDescription(stereoMixdownOfProcesses:)` で対象プロセスのみがタップされること。
+- **対象アプリが複数プロセスに分かれる場合**（ブラウザのヘルパープロセス）の挙動。
+- **SpeechAnalyzer のオンデバイス文字化**（言語モデル導入 `assetInstallationRequest` の成否、volatile/finalized の流れ）。
+- **I/O コールバックでのオーディオドロップアウト**（長時間・高負荷時）。
+
+> 結論: ビルド・バンドル化・署名・起動可能化までは完了し、**ユーザーが実機で TCC 権限を付与して手動検証（特に最重要 = 非混入）を実行できる状態**になった。
+> 実音声・実権限・GUI 目視が必要な受け入れ条件は runbook に沿って人間が確定する。目的・最重要本質「非混入」とのズレは無い（バンドル化は非混入の構造的担保 `stereoMixdownOfProcesses` をそのまま実機で検証可能にするもの）。

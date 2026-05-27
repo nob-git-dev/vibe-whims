@@ -4,6 +4,11 @@
 DerivedData/
 .DS_Store
 
+# .app バンドル化の生成物（scripts/make_app.sh が build/ に出力。署名/entitlements を含むためコミットしない）
+build/
+*.entitlements
+*.app
+
 # 実設定ファイル（例示の *.example.conf のみコミット。実値は除外）
 config.conf
 config.env
