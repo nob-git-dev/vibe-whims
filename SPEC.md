@@ -584,15 +584,20 @@ Tests/
 | 同上（Float32 ターゲットも対応） | `Float32 ターゲットでも nil にならず変換できる` | PASS |
 | 同上（48k→16k リサンプル成立） | `48k→16k のサンプルレート変換で出力フレーム数がおおよそ sampleRate 比になる` | PASS |
 | **文字化中のリアルタイム表示更新（結果受信ごとに UI へ通知・presentation 検証に必要）** | `文字起こし結果を受信するたびに transcript 更新ハンドラが呼ばれる`（TranscriptionServiceTests） | PASS |
+| **【ADR-4】append 即時にファイル末尾に永続化（クラッシュ耐性・flush を待たない）** | `append のたびにファイル末尾に内容が反映されている（flush を呼ばずに読める・ADR-4）` | PASS |
+| **【ADR-4】複数 append の順序保持（取りこぼし・順序崩れ防止）** | `複数 append が順にファイル末尾に積まれる（順序保持・ADR-4）` | PASS |
+| **【ADR-4】flush を呼ばない停止（クラッシュ模擬）でも確定済み分が残る** | `停止せず（flush を呼ばずに）読んでも内容が見える（クラッシュ模擬・ADR-4）` | PASS |
+| **【ADR-4】親ディレクトリ未存在でも append 単独で作成して書ける（flush に依存しない）** | `親ディレクトリが無くても append 時点で作成して書ける（ADR-4・親ディレクトリ作成は append 側）` | PASS |
 
 ### テスト環境
 
 - フレームワーク: Swift Testing（`import Testing`）
 - 環境: 実機・OS API・権限なしで完結（fake port 注入のみ）。ConfigLoader / FileTranscriptSink テストは一時ディレクトリ（一部はホーム配下のユニーク一時ディレクトリ）にファイル生成→破棄。
 - 実行コマンド: `swift test` / 警告ゼロ確認: `swift build -Xswiftc -strict-concurrency=complete`
-- 結果: **26 tests / 6 suites すべて PASS**（macOS 26.5 / Swift 6.3.2）。`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ。`swift build -c release` 成功。
+- 結果: **30 tests / 6 suites すべて PASS**（macOS 26.5 / Swift 6.3.2）。`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ。`swift build -c release` 成功。
   - レビュー差し戻し対応で **+6 tests / +1 suite**（FileTranscriptSinkTests）を追加。Must-1（finalize 取りこぼし防止）・Should-2（start 直接検証）・Should-3（error 経路）・FileTranscriptSink 群を Red→Green で実装。
   - 実機ログで断定した不具合修正で **+4 tests / +1 suite**（AudioFormatConverterTests 3 件 + TranscriptionServiceTests 1 件）。音声フォーマット変換（Int16 対応）と表示のリアルタイム更新を Red→Green→Refactor で実装。
+  - **ADR-4（クラッシュ耐性のための即時 append 化）対応で +4 tests**（FileTranscriptSinkTests に追加）。`FileTranscriptSink.append` のメモリバッファを廃止し、毎回ファイル末尾に追記する実装に変更。`flush()` は契約上残しつつ no-op 化。`TranscriptSink` protocol のシグネチャは不変（domain テスト 22 件全 PASS を維持）。
 
 ### カバー範囲
 
@@ -786,27 +791,30 @@ swift build
 
 ### 次の /tdd タスク（ADR-4: クラッシュ耐性のための即時 append 化）
 
-本 SPEC 更新（ADR-4）に伴い、`/tdd` フェーズで以下を実装する:
+> **Resolved（2026-05-29, /tdd）**: ADR-4 を Red→Green→Refactor で実装完了。
+> `swift test` **30 tests / 6 suites 全 PASS**、`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ、`swift build -c release` 成功を確認。
+> 詳細は「## テスト計画」の ADR-4 関連 4 件と「テスト環境」末尾の追記参照。
 
-**実装変更:**
-- `FileTranscriptSink.append` を「即時ファイル追記」に変更する
-  （`FileHandle` で末尾シーク → 書き込み、または追記モードでの write。
-  `Data.write(to:options:.atomic)` のような上書き系は使わない）。
-- 既存のメモリバッファ蓄積ロジックを廃止する。
-- 親ディレクトリ未存在時の作成は維持する（既存 Should 対応）。
-- `flush()` は「保留中があれば確実に書き出す安全網」として簡素化する
-  （即時 append 実装では実質 no-op に近くて良いが、契約として残す）。
-- スレッド安全性は actor のシリアライズで維持する。
+**実装変更（実施済み）:**
+- `FileTranscriptSink.append` を「即時ファイル末尾追記」に変更
+  （初回 append でファイル作成 → 以降 `FileHandle(forWritingTo:)` で `seekToEnd` → `write(contentsOf:)`。
+  `Data.write(to:options:.atomic)` のような上書き系は使用しない）。
+- メモリバッファ（`buffer: [String]`）を廃止。
+- 親ディレクトリ未存在時の作成は **append 側**で行うように移動
+  （flush に頼らず append 単独で書ける必要があるため）。
+- `flush()` は no-op（契約として残す。即時 append のため保留中は存在しない）。
+- スレッド安全性は actor のシリアライズで維持。
 
-**追加するテスト（Red → Green）:**
-- `append のたびにファイル末尾に内容が反映されている`（flush を呼ばずに read しても内容が見える）。
-- `複数 append が順にファイル末尾に積まれる`（順序保持）。
-- `停止せずに（flush を呼ばずに）読んでも内容が見える`（クラッシュ模擬: append のみで永続化されている）。
-- `親ディレクトリが存在しなくても作成して書ける`（既存テストの維持確認）。
+**追加したテスト（Red → Green）:**
+- `append のたびにファイル末尾に内容が反映されている（flush を呼ばずに読める・ADR-4）` — PASS
+- `複数 append が順にファイル末尾に積まれる（順序保持・ADR-4）` — PASS
+- `停止せず（flush を呼ばずに）読んでも内容が見える（クラッシュ模擬・ADR-4）` — PASS
+- `親ディレクトリが無くても append 時点で作成して書ける（ADR-4・親ディレクトリ作成は append 側）` — PASS
+- 既存の 4 件（親ディレクトリ作成 / flush 跨ぎ追記 / 書き込みエラー伝播 / `~` 展開）も維持・PASS。
 
 **回帰確認:**
-- `TranscriptSink` protocol のシグネチャは変えないため、既存 domain テスト 22 件は全 PASS を維持する。
-- `swift build -Xswiftc -strict-concurrency=complete` 警告ゼロを維持する。
+- `TranscriptSink` protocol のシグネチャ不変。domain テスト 22 件全 PASS を維持（合計 30 = 22 domain + 4 infra 既存 + 4 新規 + その他）。
+- `swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ維持。
 
 ## デプロイ計画
 <!-- /deploy が追記。2026-05-28 -->

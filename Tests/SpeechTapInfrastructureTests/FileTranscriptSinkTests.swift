@@ -79,4 +79,68 @@ struct FileTranscriptSinkTests {
         #expect(saved == "チルダ展開。\n")
         #expect(FileManager.default.fileExists(atPath: "~/\(unique)/out.txt") == false)
     }
+
+    // MARK: - ADR-4: クラッシュ耐性のための即時 append 化
+
+    @Test("append のたびにファイル末尾に内容が反映されている（flush を呼ばずに読める・ADR-4）")
+    func appendIsImmediatelyPersisted() async throws {
+        let dir = tempDir()
+        let output = dir.appendingPathComponent("out.txt")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sink = FileTranscriptSink(outputPath: output.path)
+        try await sink.append(TranscriptSegment(text: "即時1。", range: nil))
+
+        // flush を呼ばずに読んでも内容が見えていること（durably な永続化）。
+        let saved = try String(contentsOf: output, encoding: .utf8)
+        #expect(saved == "即時1。\n")
+    }
+
+    @Test("複数 append が順にファイル末尾に積まれる（順序保持・ADR-4）")
+    func multipleAppendsArePersistedInOrder() async throws {
+        let dir = tempDir()
+        let output = dir.appendingPathComponent("out.txt")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sink = FileTranscriptSink(outputPath: output.path)
+        try await sink.append(TranscriptSegment(text: "一。", range: nil))
+        try await sink.append(TranscriptSegment(text: "二。", range: nil))
+        try await sink.append(TranscriptSegment(text: "三。", range: nil))
+
+        // flush を呼ばずに読んで順に積まれていること。
+        let saved = try String(contentsOf: output, encoding: .utf8)
+        #expect(saved == "一。\n二。\n三。\n")
+    }
+
+    @Test("停止せず（flush を呼ばずに）読んでも内容が見える（クラッシュ模擬・ADR-4）")
+    func contentVisibleWithoutFlush() async throws {
+        // クラッシュ模擬: flush を呼ばずに「外部プロセスが読む」状況を再現する。
+        // append のみで永続化されていること（停止時 flush に依存しない）。
+        let dir = tempDir()
+        let output = dir.appendingPathComponent("out.txt")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sink = FileTranscriptSink(outputPath: output.path)
+        try await sink.append(TranscriptSegment(text: "クラッシュ前1。", range: nil))
+        try await sink.append(TranscriptSegment(text: "クラッシュ前2。", range: nil))
+        // ここで「アプリがクラッシュ」したとして flush は呼ばない。
+
+        // 別経路（外部のファイル read）で内容が見える＝確定済みは失われていない。
+        let saved = try String(contentsOf: output, encoding: .utf8)
+        #expect(saved == "クラッシュ前1。\nクラッシュ前2。\n")
+    }
+
+    @Test("親ディレクトリが無くても append 時点で作成して書ける（ADR-4・親ディレクトリ作成は append 側）")
+    func appendCreatesParentDirectory() async throws {
+        let dir = tempDir()
+        let output = dir.appendingPathComponent("nested/deeper/out.txt")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let sink = FileTranscriptSink(outputPath: output.path)
+        // append 単独で（flush に頼らず）親ディレクトリが作成され書ける必要がある。
+        try await sink.append(TranscriptSegment(text: "親作成。", range: nil))
+
+        let saved = try String(contentsOf: output, encoding: .utf8)
+        #expect(saved == "親作成。\n")
+    }
 }
