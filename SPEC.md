@@ -685,6 +685,102 @@ domain 境界で構造的に担保できない点を Must とする。
 - `ArchitectureGuardTests` が SPM ターゲット分離で弾けない OS フレームワーク import をソース走査で補完しており、固定要件を二重に担保している。
 - 実機検証が必要な項目を「テスト済み」と偽らず、手動検証項目として漏れなく明記している（誠実なテスト範囲申告）。
 
+### ADR-4 実装レビュー（2026-05-29, 対象 commit `3123b5e`）
+
+#### 判定: 承認（Should 2 件 / Want 2 件。Must 無し）
+
+> ADR-4 の目的「**文字化中のクラッシュ（プロセス死）時にも確定済み分が失われない**」は、現実装で達成されている。
+> `swift test` **30 tests / 6 suites 全 PASS**、`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ、
+> `swift build -c release` 成功を実機で再確認済み。SPEC.md の目的・本質・固定要件とのズレなし。
+> 受け入れ条件「### クラッシュ耐性」3 項目（即時反映・予期せぬ終了でも確定分が残る・1 ファイル末尾追記）は実装・テストで担保済み。
+
+#### 整合性チェック（SPEC の目的・本質との照合）
+
+- **「対象アプリ音声の非混入」（最重要本質）**: 本変更は永続化層のみで、`ProcessTapAudioSource` / `CATapDescription(stereoMixdownOfProcesses:)` の構造的担保には影響なし。実機検証項目として正しく未確定扱いを維持。
+- **「取りこぼし防止」を「クラッシュ時にも拡張」**: 即時 append により、ADR-3 の停止時 finalize→flush 経路はそのまま、クラッシュ時データロス窓が「停止 1 回分の蓄積」→「現在書き込み中の 1 セグメント以内」に縮小。本質の強化として正しい方向。
+- **3層一方向依存**: `TranscriptSink` protocol シグネチャ不変。変更は infrastructure 内に閉じ、`SpyTranscriptSink` も含めて domain テスト 22 件は全 PASS。固定要件「domain は OS/UI 非依存」も `ArchitectureGuardTests` PASS で維持。
+- **固定要件（SpeechAnalyzer 固定・設定外部化・TCC 音声キャプチャのみ・OS 非依存）**: 本変更はいずれにも触れていない（Foundation のみ使用）。
+
+#### 重点観点ごとの所見
+
+##### 1. クラッシュ耐性（fsync の必要性）
+
+- **プロセス死（アプリのクラッシュ・強制終了）に対しては実装は安全**: `FileHandle.write(contentsOf:)` は `write(2)` 経路で、書き込み完了時点でカーネルページキャッシュに到達する。プロセスが死んでも OS が後続で必ずディスクへフラッシュするため、ユーザー要望「途中でアプリが落ちた時に確定結果を失わない」は満たされる。
+- **電源断・カーネルパニックに対しては `fsync` していないため未保証**: SPEC「### Port セマンティクス」は「**durably に永続化**」と書いており、文字通り読むと永続化媒体（ディスク）への到達まで含む。しかし ADR-4 のトレードオフ節は「書き込み中の電源断など極稀なケース」「APFS の通常運用では十分なロバスト性」と明言しており、**今回の要望スコープ（アプリのクラッシュ）に対しては妥当な妥協点**。
+- **所見**: SPEC の文言「durably」と実装の `write(2)` レベルの間に厳密には乖離がある。ただし ADR-4 トレードオフ節と本質（プロセス死耐性）から見れば許容範囲。`fsync` を呼ばないトレードオフは「会議録の数秒分の確定結果が稀な電源断で失われ得る」というレベルで、文字化レートでは現実的問題は小さい。**Want（後述）**: 強化したい場合は `flush()` で `F_FULLFSYNC` 相当（macOS では `fcntl(F_FULLFSYNC)`）を呼ぶ余地がある。`flush()` を完全 no-op にしておくと、後でディスク到達を保証したくなった時の自然な置き場所が失われるので、契約として残している現状の判断は妥当。
+
+##### 2. FD リーク / リソース解放
+
+- **問題なし**: `let handle = try FileHandle(forWritingTo: outputURL)` の直後に `defer { try? handle.close() }` が置かれており、その後の `seekToEnd` / `write(contentsOf:)` のいずれが throw しても `defer` が確実に発火する。`FileHandle(forWritingTo:)` 自体が throw した場合は handle が未生成なので close 不要。actor 並行性下でも、actor メソッド内の同期 throw に対し Swift の `defer` セマンティクスは保たれる。
+- 初回 append 経路（`Data.write(to:)`）は `Data` 側がオープン〜クローズを内部完結するため FD 漏洩なし。
+
+##### 3. エラー伝播 / 部分書き込み
+
+- **`write(contentsOf:)` は全量書き終わるか throw するか**であり、戻り値による部分成功シグナルは持たない。Apple SDK の `_NSDataWritingContents` 系は内部で短書き込みをループするため、通常の通常時は気にしなくてよい。
+- **ディスクフルなどで途中 throw した場合**: 既に進んだ書き込みオフセット分のバイトが部分的にファイル末尾に残り得る（行末改行が欠ける部分行）。次回の append は `seekToEnd` で再度末尾にシークするため**位置不整合は起きない**が、出力ファイル末尾に行末改行欠落の壊れた 1 行が残る可能性はある（Should-A、後述）。
+- エラーは `try` で domain に伝播し、`TranscriptionService.handle()` で `failed()` 経路 → `.error` 状態遷移＋`audioSource.stop()` 解放につながる（既存テスト `recognitionStreamErrorGoesError` の保存失敗版と同じ仕組み）。
+
+##### 4. 3層一方向依存の維持
+
+- **不変・問題なし**: `TranscriptSink` の `func append(_:) async throws` / `func flush() async throws` は両方ともシグネチャ変わらず。意味（契約）の「durable な即時永続化」への強化は domain 側コードに影響しない。
+- `SpyTranscriptSink`（domain テスト）も変更なしで動作。
+- `ArchitectureGuardTests` PASS。
+
+##### 5. テストの本質適合
+
+- 新規 4 テストは ADR-4 受け入れ条件を網羅:
+  - 即時反映（flush なしで読める）→ `appendIsImmediatelyPersisted`
+  - 順序保持 → `multipleAppendsArePersistedInOrder`
+  - クラッシュ模擬（flush を呼ばずに外部 read）→ `contentVisibleWithoutFlush`
+  - 親ディレクトリ作成は append 側 → `appendCreatesParentDirectory`
+- **クラッシュ耐性のテストとして「flush を呼ばずに同プロセス内で読む」で十分か**: 実プロセス kill ではないため厳密ではないが、契約「append 完了時点でファイルに反映」を検証するには適切。プロセス死後の状態は OS のページキャッシュ→ディスク同期の問題でアプリ側コードでは検証不能（実プロセス kill テストでも fsync しなければ同様）。テスト目的としては適切に絞り込まれている。
+- **Should-B（後述）**: 空文字列 segment・改行を含む segment・既存ファイル末尾に改行が無い場合（外部編集後）の境界が未テスト。
+
+##### 6. flush の取り扱い
+
+- 現状 `flush()` は完全 no-op。`TranscriptionService.stop()` は flush を呼び、失敗時は `.error` に遷移する（黙殺しない）。**呼び出し側コードは契約として意味を持ち続ける**（将来の fsync 化や別 Sink 実装の余地）。名残のデッドコードではない。
+- **Want-1（後述）**: 耐久性向上が必要なら `flush()` で fsync 相当（macOS なら `fcntl(F_FULLFSYNC)`）を呼ぶ拡張余地がある。現状の SPEC スコープでは不要。
+
+##### 7. 改行・エンコーディング
+
+- `Data((segment.text + "\n").utf8)` で UTF-8 出力。日本語含むテキストで問題なし。
+- 旧 flush の `joined(separator: "\n") + "\n"` との見え方比較:
+  - 旧: 各セグメント間に "\n"、末尾にも "\n"。
+  - 新: 各 append が `text + "\n"` を末尾追記 → セグメント数 N で `text1\ntext2\n...textN\n` となり**等価**。
+- **境界の懸念**（Should-B）:
+  - **空文字列 segment**: 旧は `["", "x"]` を flush すると `"\nx\n"`、新は append 順次で `"\n"` + `"x\n"` = `"\nx\n"` → 等価。
+  - **text に "\n" を含む segment**: 旧・新ともそのまま追記され改行が出力される。SpeechAnalyzer の finalized が複数行を含むかは現状不明。**保存対象は finalized のみ**で、SpeechAnalyzer の typical finalized は短い文節なので実害は薄いが、設計意図として 1 行 = 1 セグメントを期待するなら正規化 or 検証が欲しい（Want-2）。
+  - **外部から末尾改行欠けの既存ファイル**を編集された場合: 新の追記は末尾シークするだけなので「前の行＋text\n」が結合されて 1 行になる可能性がある。実用上のリスクは低い。
+
+##### 8. 回帰
+
+- 既存 4 テスト（`createsParentDirectoryAndWrites` / `appendsAcrossFlushes` / `propagatesWriteError` / `expandsTilde`）は新実装で意味を保ち PASS（手元再実行で確認）。`appendsAcrossFlushes` は flush が no-op になった現在でも「複数回 append → 累積反映」を実質的に検証している（テスト名は flush の振る舞いを示唆するが、実体は累積追記のテストとして有効）。
+- `propagatesWriteError` は出力先をディレクトリパスにすることで `FileHandle(forWritingTo:)` か `Data.write(to:)` のいずれかが throw する経路を確認。新実装でも有効。
+- domain テスト 22 件全 PASS（`SpyTranscriptSink` 経由）。
+
+##### 9. 命名・可読性・一貫性
+
+- ドキュメンテーションコメントが SPEC・ADR-4 と一貫しており追従しやすい。
+- 実装は十分に単純（FileHandle で seek→write、初回は Data.write）。文字化レートでの I/O コスト懸念は ADR-4 トレードオフで言及済み。
+- 高頻度 append 時の最適化（FileHandle を actor 内で保持して使い回す）は採用していないが、現スコープでは過剰最適化と判断できる。本質（クラッシュ耐性）と実装単純性のトレードオフとして妥当。
+
+#### 指摘事項
+
+| 重要度 | 場所 | 内容 | 改善案 |
+|---|---|---|---|
+| Should-A | `FileTranscriptSink.append` | ディスクフル等で `write(contentsOf:)` が途中 throw した場合、改行を含む最終バイト群が部分書き込みで残り、出力ファイル末尾に「行末改行欠け」の壊れた行が残る可能性。次回 append との接続で行が結合されるリスクがある。確率は低いが、本質（取りこぼし防止）と緊張する。 | (a) 書き込み前にファイル末尾の最後の文字が `\n` でないことを検出した場合、次の append で先頭に `\n` を補う、または (b) 書き込み失敗時に末尾を切り詰める（`truncate(atOffset:)` で seek 前のサイズへ戻す）。最小限の対策として、書き込み失敗時にエラーログでバイト数の不整合可能性を残す。スコープを抑えるなら「現状は許容（ADR-4 トレードオフに含める）」と SPEC に明記しても可。 |
+| Should-B | `Tests/.../FileTranscriptSinkTests.swift` | 新規テストは正常系のみで、境界（空文字列 segment / 改行を含む segment / 既存ファイル末尾に改行が無いケース）が未カバー。改行・エンコーディングの SPEC 適合（旧 flush の見え方と等価）を保証するための回帰テストが欠ける。 | (a) `append(TranscriptSegment(text: ""))` で `"\n"` が積まれることのテスト、(b) `append(TranscriptSegment(text: "ab\ncd"))` でそのまま追記されるテスト、(c) ファイル末尾が改行無しの既存ファイルへ append したときの見え方を明文化するテスト、を追加する。 |
+| Want-1 | `FileTranscriptSink.flush` | 現状 no-op。SPEC「### Port セマンティクス」の「durably に永続化」を厳密に読むなら、`flush` で `fcntl(F_FULLFSYNC)`（macOS の完全永続化）相当を呼ぶ余地がある。電源断耐性まで欲しい場合の明確な拡張ポイント。 | append ごとに fcntl は I/O コストが大きいので flush 側に置く設計が自然。`stop()` が flush を呼ぶ既存フローを活かし、停止時にのみディスク同期を保証する。ADR-4 トレードオフの「電源断は許容」を覆すかは SPEC 判断。今回のスコープ（プロセス死耐性）では不要。 |
+| Want-2 | `FileTranscriptSink.append` の改行扱い | finalized text に "\n" が含まれた場合、ファイル上で「1 セグメント = 複数行」になる。後段の解析（行数＝確定回数を仮定するツール等）と緊張する可能性。 | 必要なら append 時に text 内の "\n" を空白等に置換（`text.replacingOccurrences(of: "\n", with: " ")`）。スコープ外なら無視可。 |
+
+#### 良い点
+
+- ADR-4 の意図（クラッシュ耐性のためのメモリバッファ廃止・即時 append）が実装・コメント・テスト名に一貫して反映されており、後から読んでも設計意図が明確。
+- `defer { try? handle.close() }` の配置が正しく、エラー経路でも FD リークしない。actor シリアライズで `seekToEnd → write` の競合も構造的に排除されている。
+- 初回 append でディレクトリ作成を `append` 側に移したことで「flush に依存せず append 単独で書ける」契約を強制している。設計と実装が一致。
+- `flush` を no-op として残し契約を壊さなかったことで、`TranscriptionService.stop()` の既存フロー（finalize → drain → flush + 失敗時 error 遷移）が無傷で済んでいる。port セマンティクスの明確化（実装変更 / シグネチャ不変）の好例。
+- 既存テスト 4 件を新実装でも維持・有効化しており、回帰検出能力を落としていない。
+
 
 ## 実装メモ（walking skeleton）
 <!-- /tdd（walking skeleton フェーズ）が追記。2026-05-27 -->
