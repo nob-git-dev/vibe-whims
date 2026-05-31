@@ -1180,6 +1180,24 @@ Tests/
 | **【機能B / ADR-5】volatile は翻訳しない（常に原文）** | `volatile は翻訳しない（常に原文をそのまま表示する・ADR-5）` | PASS |
 | **【機能B / ADR-5・固定要件】TranscriptSink.append には常に原文（経路分離）** | `TranscriptSink.append には常に原文が渡る（DisplayPipeline は保存経路を一切触らない）` | PASS |
 
+### テストケース（ADR-7 認識言語選択 / ADR-8 マルチプロセスタップ → テスト）
+
+ADR-7 は domain を fake で厚く TDD する。ADR-8 はプロセス集約の**判定ロジック（PID / bundleId のマッチング）を純粋関数に切り出して**ユニットテストで担保する（Core Audio 実機接触部分は手動検証項目）。
+
+| 受け入れ条件 / 本質 | テストケース | 結果 |
+|---|---|---|
+| **【ADR-7】選んだ言語が次回 start の初期認識ロケールになる（認識言語選択要件）** | `setRecognitionLocale 後に start すると、その locale が recognizer.transcribe(_, locale:) に渡る`（RecordingSpeechRecognizer で受領 locale を記録して検証） | PASS |
+| **【ADR-7】既定（未設定）では config 由来の locale が使われる（設定外部化を尊重）** | `setRecognitionLocale を呼ばない場合は init の locale（config 既定）が transcribe に渡る` | PASS |
+| **【ADR-7】実行中（running）の setRecognitionLocale は次回 start から反映（stop API 不変・実行中ライブ切替はスコープ外）** | `running 中に setRecognitionLocale しても当該セッションの locale は変わらず、次回 start で反映される` | PASS |
+| **【ADR-7・固定要件】認識 locale を変えても保存は原文（経路分離の回帰防止）** | `非日本語 locale を選んでも TranscriptSink.append には認識原文がそのまま渡る（翻訳結果は保存されない）`（SpyTranscriptSink） | PASS |
+| **【ADR-7】RecognitionCapabilities port で対応ロケール一覧を取得できる（メニュー構築用・OS 型を漏らさない）** | `RecognitionCapabilities.supportedLocales() が Foundation の [Locale] を返す（fake で検証）` | PASS |
+| **【ADR-8・最重要本質=非混入】対象アプリ所属プロセスのみが集約され、他アプリは除外される** | `集約判定: 対象アプリのメイン PID / 同一 bundleId / responsiblePID 一致のプロセスのみ選ばれる`（ProcessMatcher 純粋関数 + fake プロセス一覧） | PASS |
+| **【ADR-8・非混入】曖昧（bundleId 取得不能・判定不可）なプロセスは除外側に倒す** | `bundleId 不明・どの基準にも明確に該当しないプロセスは集約に含めない（偽陽性で他アプリ音を混ぜない）` | PASS |
+| **【ADR-8】単一プロセスアプリは従来どおりメイン PID が必ず含まれる（既存挙動を壊さない）** | `関連プロセスがメイン 1 つだけのアプリでも、メイン PID の AudioObjectID が集約に含まれる` | PASS |
+| **【ADR-8】ブラウザ相当（ヘルパー別 PID）でも responsiblePID 経由で対象アプリのプロセス群が集まる** | `responsiblePID が対象アプリのメイン PID を指すヘルパーは集約に含まれる（メイン無音問題の根治）` | PASS |
+
+> **ADR-8 の Core Audio 実機接触部分**（`kAudioHardwarePropertyProcessObjectList` / `kAudioProcessPropertyPID` / `responsiblePID` の実取得・`CATapDescription(stereoMixdownOfProcesses:)` への配列受け渡し）は実機・実音声がないと検証できないため、純粋関数 `ProcessMatcher` でマッチング判定のみをユニットテストし、OS API 呼び出しは「### infrastructure 手動検証項目」に記録する。
+
 ### テスト環境
 
 - フレームワーク: Swift Testing（`import Testing`）
