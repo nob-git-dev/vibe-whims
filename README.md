@@ -1,4 +1,17 @@
-# NES Binary Experiment
+# vibe-whims
+
+> A small collection of **AI-native software experiments** — two independent projects, each living on its own branch.
+
+| Project | Branch | What it is |
+|---|---|---|
+| 🎮 **NES Binary Experiment** | [`main`](https://github.com/nob-git-dev/vibe-whims/tree/main) (this branch) | Can an AI emit a working binary **without writing source code**, by authoring annotated hex directly? Produces a real `.nes` ROM, playable in a Rust→WASM browser emulator. |
+| 🎙 **speech-tap** | [`speech-tap`](https://github.com/nob-git-dev/vibe-whims/tree/speech-tap) | A macOS menu-bar app that transcribes the audio of a **single chosen app** in real time, fully on-device, using Apple's new **SpeechAnalyzer** (macOS 26), **Core Audio Process Tap**, and the **Translation** framework. |
+
+> The two projects share this repository only as a home for experiments — their code and git history are independent. Switch branches above to explore each. The rest of this page documents the **NES Binary Experiment** (this branch); see the [`speech-tap` branch README](https://github.com/nob-git-dev/vibe-whims/tree/speech-tap) for that project.
+
+---
+
+## 🎮 NES Binary Experiment
 
 > **Can AI output binary directly — without writing source code?**
 
