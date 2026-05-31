@@ -1217,6 +1217,103 @@ domain 境界で構造的に担保できない点を Must とする。
 - `flush` を no-op として残し契約を壊さなかったことで、`TranscriptionService.stop()` の既存フロー（finalize → drain → flush + 失敗時 error 遷移）が無傷で済んでいる。port セマンティクスの明確化（実装変更 / シグネチャ不変）の好例。
 - 既存テスト 4 件を新実装でも維持・有効化しており、回帰検出能力を落としていない。
 
+### 新機能 A/B/C 実装レビュー（2026-05-31, 対象 commit `66799f2`）
+
+#### 判定: 承認（条件付き / Should 3 件 / Want 2 件。Must 無し）
+
+> 新機能A（セッション複本）/ B（オンデバイス翻訳）/ C（ピン）の追加（+約 1900 行・+14 tests）。
+> **固定要件はすべて遵守**されており、Must 級の違反は検出されなかった。
+> 報告どおりの自動チェックを実機で再確認:
+> - `swift test`: **44 tests / 9 suites 全 PASS**（macOS 26.5 / Swift 6.3.2）。
+> - `swift build -Xswiftc -strict-concurrency=complete`: **警告ゼロ**。
+> - `swift build -c release`: 成功。
+> - ネットワーク API（`URLSession`/`URLRequest`/`NSURLSession`/`NSURLConnection`/`NWConnection`/`import Network`）の使用箇所: **コメントを除きゼロ**（`grep -rnE` で確認）。
+> - domain ターゲット全 22 ファイル: `import Foundation` のみ（OS/UI フレームワーク非依存・`ArchitectureGuardTests` PASS）。
+>
+> ただし機能Bの「黙って失敗させない」要件と `Translator.ensureAvailable` の呼び出し漏れに Should 級の構造的ギャップがあるため、条件付き承認とする（実機検証で `AppleTranslator` を実装する際に同時に解決される範囲）。
+
+#### 固定要件の遵守確認（すべて違反なし）
+
+- [x] **3層一方向依存**: `Package.swift` でターゲット分離。domain は他ターゲット非依存。`ArchitectureGuardTests` が OS/UI 系 import の禁止リストをソース走査で PASS（`import Foundation` のみ確認済み）。
+- [x] **domain は OS/UI 非依存**: 新規 port（`Translator` / `LanguageDetector` / `SessionExporter`）すべて Foundation の `Locale` / `Date` / `URL` のみで構成。`TranslationSession` / `NLLanguageRecognizer` / `FileHandle` 等の OS 型を漏らさない。
+- [x] **SpeechAnalyzer / Apple Translation framework 固定**: `SpeechAnalyzerAdapter` / `AppleTranslator` のみ（他翻訳エンジン混入なし）。`AppleTranslator` は `#if canImport(Translation)` で OS 提供フレームワーク以外を呼ばない構造。
+- [x] **表示と保存の経路分離**: `DisplayPipeline` は `TranscriptStore` / `TranscriptSink` を一切参照せず、関数入出力のみ。`TranscriptionService.handle()` の `sink.append(...)` には `result.text`（原文）が直接渡る（行 175）。コードレベルで「翻訳結果が保存経路に流入する経路は存在しない」ことを確認。さらに `DisplayPipelineTests.transcriptSinkReceivesOriginalText` および `clearDisplayDoesNotTouchSink` が Spy で構造的に担保。
+- [x] **メインファイル append 非破壊**: `TranscriptSink` protocol シグネチャ・`FileTranscriptSink` 実装・`TranscriptionService.stop()` API すべて不変（diff 検証）。`SpeechRecognizer` port を含む ADR-3/4 経路は無変更。既存 30 テスト全 PASS で構造的に回帰なしを確認。
+- [x] **オンデバイス完結**: 新規ファイル含む全ソースで `URLSession`/`URLRequest`/`NWConnection`/`import Network` の使用箇所ゼロ（`AppleTranslator.swift` 内のコメントのみヒット）。`AppleTranslator` は `Translation` モジュールのみ条件付き import で外部送信経路を持たない。
+- [x] **ピン非永続化**: `TranscriptWindowController` で `window.isRestorable = false`（行 32）を設定。`isPinned: Bool = false` をプロパティで保持するのみで `UserDefaults` / 設定ファイル / `NSWindow` 状態復元の参照ゼロ（`grep` 確認）。再起動で OFF からスタートが構造的に保証。
+- [x] **設定外部化 / TCC=音声キャプチャ権限のみ**: 本サイクルでは設定・権限関連の変更なし（不変）。
+
+#### DisplayPipeline の挙動（個別観点）
+
+- [x] **日本語と判定されたら翻訳を呼ばない**: `isSameLanguage(detected, targetLocale)` が真なら `translator.translate` を呼ばずに原文を返す（行 39-41）。`japaneseFinalizedIsNotTranslated` が `translator.calls.isEmpty` を直接検証。
+- [x] **volatile は翻訳しない**: `renderVolatile` は無条件に原文を返す（行 51-53）。`volatileIsNeverTranslated` で担保。
+- [x] **翻訳失敗時の原文フォールバック**: `do/catch` で `try await translator.translate(...)` を包み、catch 節で原文を返す（行 42-46）。`translationFailureFallsBackToOriginal` で担保。
+- [x] **言語コードの突き合わせ**: `isSameLanguage` は識別子を `-` / `_` で先頭セグメントに切り出して大文字小文字無視で比較。`NLLanguageRecognizer.dominantLanguage.rawValue` は BCP-47（`"en"` / `"ja"` 等）を返すため、`Locale(identifier: "ja-JP")` との比較が「`ja` vs `ja`」で正しく成立する。実装は単純で頑健。
+
+#### `AppleTranslator` スケルトンの安全性
+
+- [x] **throw → 原文フォールバックの経路接続**: `translate` / `ensureAvailable` 共に `TranslationError.notImplemented` を throw する。`DisplayPipeline.renderFinalized` の catch 節が拾い、UI は原文表示にフォールバックする（黙って空表示にならない）。
+- [x] **`#if canImport(Translation)` の構造**: import 不能環境でもコンパイルが通る安全構造。OS 型を保持しないスケルトンで、実機検証で API が確定したら閉じた範囲で実装を埋められる。
+- 注（Should-1 として後述）: フォールバック発生時にユーザーへ「翻訳: 利用不可（原文表示）」を**通知する経路が現状繋がっていない**（SPEC「黙って失敗させない」要件に対し構造的に半達成）。
+
+#### セッション境界の正しさ（ADR-6）
+
+- [x] **start 成功時のみ `_startedAt = Date()`、`_stoppedAt = nil` にリセット**（`TranscriptionService` 行 121-122）。`stop` 成功完了時にのみ `_stoppedAt = Date()`（行 218）。
+- [x] **flush 失敗時の取り扱い**: `sink.flush()` 失敗時は `_stoppedAt` を更新せず `.error` 遷移（行 211-215）。`currentSessionTimes` は両方が揃わない限り nil を返すため、StopFlowCoordinator は `.stopped` でしか駆動されず安全。
+- [x] **`clearDisplay()` は `TranscriptSink` 非接触**: `TranscriptStore.clearDisplay` は `_finalized.removeAll()` / `_volatile = ""` のみで sink 参照を持たない（行 63-68）。`clearDisplayDoesNotTouchSink` テストが Spy で構造的に担保。
+
+#### DownloadsSessionExporter
+
+- [x] **ファイル名規則**: `yyyyMMdd-HHmmss` を `en_US_POSIX` ロケール固定で組み立て、`speech-tap-` プレフィックスを付与。`exportsSegmentsAsLines` で確認。
+- [x] **衝突時の `-2`/`-3` サフィックス・上書き禁止**: `uniqueURL` が `n=2..∞` で順次空きを探索。`Data.write(to:options: [.withoutOverwriting])` で上書きを OS 側でも禁止（二重防御）。`collisionAppendsSuffix` で 3 連続生成を検証。
+- [x] **空セッションでも空ファイル作成**: `emptySessionWritesEmptyFile` で担保。
+- [x] **メインファイル経路と独立**: `DownloadsSessionExporter` は `FileTranscriptSink` を一切参照しない。テストでも別の一時ディレクトリへ書き出すだけで、メイン経路への副作用なし。
+- 注（Should-2 として後述）: `~/Downloads` 存在しない/権限不足ケースは `createDirectory(withIntermediateDirectories: true)` 後に `Data.write` が throw する経路で正しく失敗するが、`StopFlowCoordinator` が**書き出し失敗時に表示クリアダイアログをスキップする**（行 70 `return`）ため、ユーザーが「表示クリアできない」UX になり得る。SPEC「複本書き出しの失敗は停止フロー全体を巻き戻さない」要件に厳密には反しないが、表示クリア判断は複本書き出しと独立してよい（Should）。
+
+#### ピン（機能C）
+
+- [x] **`togglePin()` の構造的正しさ**: `isPinned.toggle()` → `window.level` 切替 → ボタン画像・state 更新が一括（`TranscriptWindowController.togglePin`）。
+- [x] **非永続化の構造的担保**: `window.isRestorable = false`（行 32）。`UserDefaults` / `NSUserDefaultsController` / `restorableState` 等への参照ゼロ。
+- 注（Want-1 として後述）: 機能C のテストは現状無し。SPEC「機能C のテスト方針」で「GUI 直接テストは行わない・手動検証」と明示されており方針は SPEC と整合しているが、`togglePin()` 自体は AppKit `NSWindow` のオプショナル参照経由でテスト可能（headless `NSWindow` でも動く）。手動検証チェックリスト（SPEC 1037-1041）の存在で十分とも判断できる。
+
+#### 並行性 / Swift 6 strict-concurrency
+
+- [x] **`-strict-concurrency=complete` 警告ゼロ**: 再実機ビルドで確認済み。
+- [x] **`DisplayPipeline` は actor**: `LanguageDetector` の同期呼び出し + `Translator` の `async throws` 呼び出しを actor 境界でシリアライズ。
+- [x] **`AppleTranslator` は actor**: 将来 `TranslationSession` を保持する場合の Sendable 制約に備えた設計。
+- [x] **`DownloadsSessionExporter` は actor**: ファイル I/O をシリアライズ。
+- [x] **`TranscriptionService` の `_startedAt`/`_stoppedAt`**: actor の隔離下にあり、データ競合なし。
+- [x] **`AppleLanguageDetector`**: `NLLanguageRecognizer` のインスタンスを `detect` 内でローカルに生成し、各呼び出しで独立。`@unchecked Sendable` だが共有可変状態を持たないため安全。
+
+#### テストの本質適合
+
+- [x] **「保存経路に原文のみ」を Spy で構造的に担保**: `DisplayPipelineTests.transcriptSinkReceivesOriginalText` が `SpyTranscriptSink` で `appended.map(\.text) == ["hello"]` を直接アサート（翻訳結果 "こんにちは" は sink に絶対渡らないことを表現）。本質テストとして適切。
+- [x] **`clearDisplay` が sink を触らない**ことも `SpyTranscriptSink` の `appended.isEmpty && flushCount == 0` で直接担保。
+- [x] **DisplayPipeline 失敗系**（判定不能 nil / Translator throw）と非日本語ハッピーパスの双方をカバー。
+- [x] **DownloadsSessionExporter 衝突系**（`-2`/`-3` 連鎖）と空セッションの境界もカバー。
+- 注（Want-2）: `AppleLanguageDetector` の confidence しきい値 0.5 / 短文（2 文字未満）の境界テストはまだ無い。実機検証で確定する事項に該当するため Want に留める。
+
+#### 指摘事項
+
+| 重要度 | 場所 | 内容 | 改善案 |
+|---|---|---|---|
+| Should-1 | `DisplayPipeline.renderFinalized` の catch / `AppDelegate.translationStatus` | SPEC 受け入れ条件「翻訳パックが未インストール / 利用不可な場合、**ユーザーにその旨が通知され**、表示は原文にフォールバックする」「黙って失敗させない」（ADR-5「未インストール時 UI」(b)）を満たすには、`Translator.translate` の throw を catch した時点で **メニュー状態行に「翻訳: 利用不可（原文表示）」を表示する経路**が必要。現状の `DisplayPipeline` は throw を握って原文を返すだけで、上流（AppDelegate / StopFlowCoordinator の `onStatusMessage`）に通知する経路が繋がっていない。`AppleTranslator` がスケルトン状態の今は「常にフォールバック発生＝常に通知が出る」運用なので暫定上はユーザー UX も明確だが、実機 API 接続後も同じ穴が残る。 | (a) `DisplayPipeline` を「String + 任意の状態通知」の戻り値構造（例: `RenderResult { text: String, didFallback: Bool, failureReason: String? }`）に拡張し、AppDelegate が `translationStatus` を更新する。または (b) `DisplayPipeline` のコンストラクタに `onTranslationFailure: @Sendable (Error) -> Void` を渡し、catch 内で呼ぶ。実機検証で `AppleTranslator` を実装するタイミングで同時に解決するのが自然。`ensureAvailable` の throw も同じ経路に乗せる。 |
+| Should-2 | `AppDelegate.applicationDidFinishLaunching` で `Translator.ensureAvailable` が**一度も呼ばれていない** | SPEC「ADR-5 / Translator port のセマンティクス」に「`Translator.ensureAvailable(for:)` を**初回検出時に呼ぶ**（起動時ではなく、対象言語が判明したタイミング）」と明記されているが、現コードベース全体を `grep -n "ensureAvailable"` しても呼び出し箇所が無い。`AppleTranslator.ensureAvailable` は定義されているが API スケルトン状態で、`DisplayPipeline` も `translate` だけを呼ぶ。結果として「初回非日本語検出時のダウンロード許諾フロー」が起動しない（実機 API 接続後も自然には繋がらない）。 | `DisplayPipeline.renderFinalized` の「非日本語検出 → translate 呼び出し」前に `ensureAvailable(for: detected)` を一度だけ呼ぶ（言語ごとに `Set<String>` で済み記録）。失敗時は Should-1 の通知経路に乗せて原文フォールバック。`AppleTranslator` の実機実装と同タイミングで実装可。 |
+| Should-3 | `StopFlowCoordinator.runStopFlow` 行 64-70 | `exporter.export` 失敗時に `presentInfo` で通知後、`return` で**表示クリア確認ダイアログをスキップ**している。SPEC 受け入れ条件「Downloads の複本書き出しに失敗してもメインファイルへの保存（既存の取りこぼし防止本質）は損なわれない（複本の失敗は停止フロー全体を巻き戻さない）」とは矛盾しないが、ユーザー目線では「複本失敗時にウィンドウが永遠に消せない」UX 副作用が発生する。複本書き出しと表示クリアは独立した関心事（メインファイルへの append は完了済み）であり、複本失敗時にも表示クリアダイアログは出して良い。 | 失敗通知を出した後も `await askClearDisplay()` を続行する。あるいはダイアログメッセージで「複本書き出しに失敗しましたが、表示はクリアできます」と明示する。 |
+| Want-1 | `TranscriptWindowController.togglePin()` のテスト | SPEC「機能C のテスト方針」は「GUI 直接テストは行わない」と明示しているため方針逸脱ではないが、`togglePin()` 自体は AppKit の `NSWindow` 参照だけで動く純粋なトグルなので headless テストでも実行可能。`isPinned` プロパティ・`window.level` 切替・`pinButton.state` の三つ巴を一括で検証する単体テストが書ける。手動検証チェックリスト（SPEC 1037-1041）が機能している前提では必須ではない。 | プロジェクト方針を維持するなら不要。回帰検出が欲しければ `presentation` ターゲットにテストターゲットを追加し、`TranscriptWindowController()` を生成 → `togglePin()` → `#expect(controller.isPinned == true)` 等の最小テスト。 |
+| Want-2 | `AppleLanguageDetector` の confidence しきい値 0.5 / 短文閾値 `>= 2` | SPEC「実機検証で確定する事項」に「NLLanguageRecognizer の confidence しきい値」と明記されており、実機検証フェーズで確定する範囲。現状の暫定値（0.5 / 2 文字）は SPEC と整合しているが、境界テストが無いため将来の閾値変更時に挙動の差分が見えにくい。 | 実機検証で確定する事項のため Want。確定時に `AppleLanguageDetector` の単体テスト（実 `NLLanguageRecognizer` を使う infrastructure テスト）を追加するのが自然。 |
+
+#### 良い点
+
+- 仕様の「**画面表示と保存の経路分離**」を、`DisplayPipeline` を純粋な変換関数（`String -> String`）に閉じ、`TranscriptStore` / `TranscriptSink` への参照を一切持たないという**型レベルで担保**する設計が秀逸。`DisplayPipelineTests` の Spy 検証もこの構造を裏づけており、テストが「実装を写経する」ではなく「本質を構造的に守る」になっている。
+- `/tdd` の設計判断「`DisplayPipeline` を SPEC 「presentation 配置」から domain 配置に変更」は固定要件「domain は OS/UI 非依存」と完全整合で、AppKit 非 import の純関数として fake テスト容易性を最大化している。SPEC 側でも ADR-5 影響欄に「`DisplayPipeline` を presentation に新設」とあるが、SPEC は責務分担を示唆するだけで物理配置を強制していないため、domain への移動は妥当な判断。`DisplayPipeline.swift` 冒頭のドキュメンテーションで判断理由を明示しており、後続が読んだ時に意図が分かる。
+- `TranscriptionService.stop()` の API（戻り値・コールバック・例外）が**完全に不変**で、`_startedAt`/`_stoppedAt` の追加と `currentSessionTimes` ゲッタの公開だけで機能A の境界時刻を presentation に渡している。`stop` フローの主経路（ADR-3/4）は文字通り 1 行も触られておらず、固定要件「メイン append 非破壊」を構造的に担保。
+- `DownloadsSessionExporter` の衝突回避が `[.withoutOverwriting]` と `uniqueURL` の二重防御で、ロジック上どちらかが壊れても他方が止める設計（防御的プログラミングの好例）。
+- `AppleTranslator` のスケルトンが `throw → DisplayPipeline の原文フォールバック` で end-to-end に動くため、実機 API 接続前でも **「黙って空表示にならない」「機能B が落としても機能A/C が壊れない」**ことが保証されている。スケルトンとしての価値が高い。
+- `AppleLanguageDetector` の `@unchecked Sendable` は `NLLanguageRecognizer` をローカル変数に閉じて共有しないため真の Sendable と等価に振る舞う。意図的な選択で、コメントで明文化されている。
+- Swift 6 strict-concurrency=complete 警告ゼロを 44 tests・3 つの新 actor 追加で維持しているのは堅実。
+- 既存 30 テストを 1 件も壊さず +14 tests を Red→Green→Refactor で追加した経緯が `## テスト計画` に明確に記録されており、トレーサビリティが高い。
+
 
 ## 実装メモ（walking skeleton）
 <!-- /tdd（walking skeleton フェーズ）が追記。2026-05-27 -->
