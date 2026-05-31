@@ -18,13 +18,21 @@ let package = Package(
     ],
     targets: [
         // domain: 純粋ロジック。Foundation 以外・OS API・UI に依存しない。
+        // C シム（CProcResponsibility）にも依存しない（OS/C 非依存を維持・ADR-8 / Should-1）。
         .target(
             name: "SpeechTapDomain"
         ),
+        // C シム（infrastructure 専用）: libSystem の private シンボル
+        // responsibility_get_pid_responsible_for_pid を Swift から安全に呼ぶための薄いラッパ。
+        // domain はこれに依存しない（層分離を維持）。@_silgen_name を避け明示的 C ターゲットにする。
+        .target(
+            name: "CProcResponsibility"
+        ),
         // infrastructure: OS API への接触のみ。domain の port を実装する。
+        // responsiblePID 取得のため C シム CProcResponsibility にのみ依存（domain には入れない）。
         .target(
             name: "SpeechTapInfrastructure",
-            dependencies: ["SpeechTapDomain"]
+            dependencies: ["SpeechTapDomain", "CProcResponsibility"]
         ),
         // presentation + Composition Root（ADR-2）。
         // メニューバー常駐 UI を持ち、infrastructure の具体 Adapter を生成して domain に注入する。

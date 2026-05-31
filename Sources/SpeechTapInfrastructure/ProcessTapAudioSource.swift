@@ -8,6 +8,9 @@ import AudioToolbox
 #if canImport(AppKit)
 import AppKit
 #endif
+#if canImport(CProcResponsibility)
+import CProcResponsibility
+#endif
 #if canImport(os)
 import os
 #endif
@@ -286,13 +289,15 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
         let selected = chosen.map(\.audioObjectID)
 
         #if canImport(os)
-        // 実機切り分け用の診断ログ（info）: 集約したプロセス数・各 PID・bundleId（非混入の検証用）。
-        for info in chosen {
+        // 実機切り分け用の診断ログ（info）: 走査した**全**プロセスの PID / bundleId / responsiblePID /
+        // 採用可否と理由（非混入とブラウザ捕捉の双方を実機で検証するため）。
+        for info in infos {
+            let label = decisionLabel(ProcessMatcher.decision(for: info, to: target))
             tapLog.info(
-                "tap target process: pid=\(info.pid) bundleId=\(info.bundleId ?? "nil", privacy: .public) responsiblePID=\(info.responsiblePID ?? -1) audioObjectID=\(info.audioObjectID)"
+                "tap process: pid=\(info.pid) bundleId=\(info.bundleId ?? "nil", privacy: .public) responsiblePID=\(info.responsiblePID ?? -1) audioObjectID=\(info.audioObjectID) decision=\(label, privacy: .public)"
             )
         }
-        tapLog.info("aggregation: scanned=\(allObjects.count) matched=\(selected.count) for mainPID=\(mainPID) bundleId=\(bundleId ?? "nil", privacy: .public)")
+        tapLog.info("aggregation: scanned=\(infos.count) matched=\(selected.count) for mainPID=\(mainPID) bundleId=\(bundleId ?? "nil", privacy: .public)")
         #endif
 
         // 万一マッチが空（一覧は取れたが対象が見つからない）なら、最後の安全網としてメイン PID 単体を試す。
@@ -349,15 +354,42 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
         #endif
     }
 
-    /// PID の責任プロセス（responsiblePID）を取得する。
-    /// TODO(実機検証): responsiblePID の安定取得 API（libproc / Core Audio）は macOS 26 実機で確定する
-    ///                （SPEC「ADR-8 で実機検証する事項」）。安定 API が未確定のため、初版は nil を返す
-    ///                （= responsiblePID 基準は使わず、メイン PID 一致 / bundleId 一致のみで判定）。
-    ///                bundleId が独立なヘルパー（Chrome Helper 等）の取りこぼしは実機で確認し、
-    ///                必要なら responsiblePID 取得をここに実装する（非混入を最優先・曖昧は除外側）。
+    /// PID の責任プロセス（responsiblePID）を取得する（ADR-8 / Should-1）。
+    ///
+    /// libSystem の private シンボル `responsibility_get_pid_responsible_for_pid` を C シム
+    /// （`CProcResponsibility`）経由で呼ぶ。Chrome 等のレンダラーは NSRunningApplication 非登録
+    /// （bundleId=nil）だが、責任プロセス（= 本体）の PID を返すため、これを ProcessMatcher の
+    /// 基準2（責任元が対象メイン PID）で採用してレンダラー音声を捕捉できる。
+    ///
+    /// 安全側挙動（非混入優先）:
+    /// - 取得不能/エラー（C シムが負値を返す）→ nil（曖昧として除外側に倒す）。
+    /// - 自分自身が責任元（戻り値が引数 pid と同一）→ nil。これは「責任を持つ別プロセスが居ない」
+    ///   ことを意味し、責任元経由での採用には使えない。メイン本体自身は基準1（pid 一致）で別途拾うため、
+    ///   ここで nil にしても取りこぼさない（他アプリの自己責任プロセスを基準2 で誤って巻き込まない）。
     private func responsiblePID(for pid: pid_t) -> pid_t? {
+        #if canImport(CProcResponsibility)
+        let responsible = stc_responsible_pid_for_pid(pid)
+        // 取得不能（負値・0）は除外側に倒す。
+        guard responsible > 0 else { return nil }
+        // 自己責任（責任元が自分自身）は基準2 では使わない（メイン本体は基準1 で拾う）。
+        guard responsible != pid else { return nil }
+        return responsible
+        #else
         return nil
+        #endif
     }
+
+    #if canImport(os)
+    /// 診断ログ用に採用判定を短い人間可読ラベルへ変換する。
+    private func decisionLabel(_ decision: ProcessMatcher.Decision) -> String {
+        switch decision {
+        case .includedByMainPID: return "INCLUDE(mainPID)"
+        case .includedByResponsiblePID: return "INCLUDE(responsiblePID)"
+        case .includedByBundleNamespace: return "INCLUDE(bundleNamespace)"
+        case .excludedAmbiguousOrOther: return "EXCLUDE(ambiguous/other)"
+        }
+    }
+    #endif
 
     private func tapStreamDescription(_ tapID: AudioObjectID) throws -> AudioStreamBasicDescription {
         var address = AudioObjectPropertyAddress(

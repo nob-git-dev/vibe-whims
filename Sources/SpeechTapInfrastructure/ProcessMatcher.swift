@@ -54,20 +54,44 @@ enum ProcessMatcher {
             .map(\.audioObjectID)
     }
 
+    /// 採用判定の結果と理由（実機切り分け用の診断ログに使う。判定ロジックの単一の真実源）。
+    enum Decision: Equatable {
+        case includedByMainPID            // 基準1: メイン PID 一致
+        case includedByResponsiblePID     // 基準2: 責任プロセスが対象メイン PID（レンダラー捕捉）
+        case includedByBundleNamespace    // 基準3: bundleId が対象 or 名前空間配下
+        case excludedAmbiguousOrOther     // いずれにも明確に該当せず（他アプリ・曖昧）→ 除外
+
+        var isIncluded: Bool {
+            switch self {
+            case .includedByMainPID, .includedByResponsiblePID, .includedByBundleNamespace:
+                return true
+            case .excludedAmbiguousOrOther:
+                return false
+            }
+        }
+    }
+
     /// プロセスが対象アプリに属するか（いずれかの基準に明確に該当するか）を判定する。
     static func belongs(_ process: ProcessInfo, to target: Target) -> Bool {
+        decision(for: process, to: target).isIncluded
+    }
+
+    /// 採用/除外の判定とその理由を返す（純粋関数・OS 非接触。`belongs` の真実源）。
+    static func decision(for process: ProcessInfo, to target: Target) -> Decision {
         // 基準1: メイン PID 一致（従来対象を必ず含む）。
-        if process.pid == target.mainPID { return true }
+        if process.pid == target.mainPID { return .includedByMainPID }
         // 基準2: 責任プロセスが対象メイン PID（ブラウザのヘルパー/レンダラー）。
-        if let responsible = process.responsiblePID, responsible == target.mainPID { return true }
+        if let responsible = process.responsiblePID, responsible == target.mainPID {
+            return .includedByResponsiblePID
+        }
         // 基準3（補助）: bundleId が対象に属する（双方取得できている場合のみ。曖昧=nil は除外側）。
         // 完全一致、または対象 bundleId の名前空間配下（"<target>." 始まり）のみ採用する。
         if let bid = process.bundleId, let targetBid = target.bundleId, !targetBid.isEmpty {
-            if bid == targetBid { return true }
-            if bid.hasPrefix(targetBid + ".") { return true }
+            if bid == targetBid { return .includedByBundleNamespace }
+            if bid.hasPrefix(targetBid + ".") { return .includedByBundleNamespace }
         }
         // いずれにも明確に該当しない（他アプリ・曖昧）→ 除外（非混入優先）。
-        return false
+        return .excludedAmbiguousOrOther
     }
 }
 
