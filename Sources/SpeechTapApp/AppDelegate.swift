@@ -14,6 +14,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var service: TranscriptionService?
     private var config: LoadedConfig?
 
+    // 機能B（ADR-5）: 表示パイプライン（保存パスとは独立）。
+    private var displayPipeline: DisplayPipeline?
+    // 機能A（ADR-6）: 停止フロー駆動。
+    private var stopFlowCoordinator: StopFlowCoordinator?
+    // 翻訳/エクスポート関連の状態通知（メニュー「状態」行に表示）。
+    private var translationStatus: String = ""
+
     // UI 状態。
     private var apps: [TargetApp] = []
     private var selectedApp: AppId?
@@ -30,6 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.selectedApp = cfg.targetAppId
 
             // domain に port を注入（domain は具体型を知らない＝逆依存なし）。
+            // 注: TranscriptionService のコンストラクタは ADR-5/6 でも不変
+            //     （翻訳・エクスポートはサービス外で組み立てる / Composition Root 注入順序参照）。
             let service = TranscriptionService(
                 audioSource: ProcessTapAudioSource(),
                 recognizer: SpeechAnalyzerAdapter(),
@@ -41,11 +50,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             self.service = service
 
+            // 機能B / ADR-5: 表示パイプライン（言語検出 → 必要なら翻訳 → 表示用テキスト）。
+            // 保存経路（TranscriptSink）には触れない（経路分離・固定要件）。
+            let translator = AppleTranslator()
+            let languageDetector = AppleLanguageDetector()
+            self.displayPipeline = DisplayPipeline(
+                detector: languageDetector,
+                translator: translator,
+                targetLocale: Locale(identifier: "ja-JP")
+            )
+
+            // 機能A / ADR-6: 停止フロー駆動（Downloads 複本書き出し → 表示クリア確認）。
+            // TranscriptionService.stop() の API は不変、`.stopped` 遷移を観測して駆動する。
+            let exporter = DownloadsSessionExporter()
+            // window はまだ作っていないので nil 始まりで OK（最初に表示要求が来た時に作る）。
+            let coordinator = StopFlowCoordinator(
+                exporter: exporter,
+                service: service,
+                window: nil,
+                onStatusMessage: { [weak self] message in
+                    DispatchQueue.main.async {
+                        self?.translationStatus = message
+                        self?.rebuildMenu()
+                    }
+                }
+            )
+            self.stopFlowCoordinator = coordinator
+
             // 状態変化を UI に反映する（ViewModel 相当の薄い橋渡し）。
             Task {
                 await service.setStateChangeHandler { [weak self] state in
                     DispatchQueue.main.async {
                         self?.onStateChanged(state)
+                        // 機能A: .stopped で Downloads 複本書き出し + 表示クリア確認を起動。
+                        self?.stopFlowCoordinator?.handleStateChange(state)
                     }
                 }
                 // running 中にストリーミングで届く volatile/finalized を表示へリアルタイム反映する。
@@ -97,6 +135,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusMenuItem = NSMenuItem(title: "状態: \(latestStateText)", action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+        if !translationStatus.isEmpty {
+            // 機能A/B 関連の通知（翻訳パック未取得・複本書き出し結果等）。黙って空表示にしない。
+            let extra = NSMenuItem(title: "  \(translationStatus)", action: nil, keyEquivalent: "")
+            extra.isEnabled = false
+            menu.addItem(extra)
+        }
         menu.addItem(.separator())
 
         // 対象アプリ選択（一覧）。
@@ -178,7 +222,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showTranscriptAction() {
         if transcriptWindow == nil {
-            transcriptWindow = TranscriptWindowController()
+            let window = TranscriptWindowController()
+            transcriptWindow = window
+            // 機能A: 停止フローからのクリア要求を届けるため、coordinator に window を登録する。
+            stopFlowCoordinator?.setWindow(window)
         }
         transcriptWindow?.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -213,12 +260,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateTranscriptWindow() {
         guard let service, let window = transcriptWindow else { return }
+        let pipeline = self.displayPipeline
         Task {
             let store = await service.transcriptStore
-            let finalized = store.finalizedText
+            // 保存経路（TranscriptSink）には常に原文が渡る（domain 側で完結済み）。
+            // ここでは表示用にのみ DisplayPipeline で言語検出→必要なら翻訳した文字列を組み立てる
+            // （機能B / ADR-5: 表示と保存の経路分離・volatile は翻訳しない）。
+            let segments = store.finalizedSegments
             let volatile = store.volatileText
+            var displayLines: [String] = []
+            if let pipeline {
+                for seg in segments {
+                    let rendered = await pipeline.renderFinalized(seg.text)
+                    displayLines.append(rendered)
+                }
+            } else {
+                displayLines = segments.map(\.text)
+            }
+            let finalizedDisplay = displayLines.joined(separator: " ")
             await MainActor.run {
-                window.update(finalized: finalized, volatile: volatile)
+                window.update(finalized: finalizedDisplay, volatile: volatile)
             }
         }
     }

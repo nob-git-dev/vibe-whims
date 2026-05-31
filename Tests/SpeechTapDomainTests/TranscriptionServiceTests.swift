@@ -239,6 +239,31 @@ struct TranscriptionServiceTests {
         #expect(await sink.flushCount == 1)
     }
 
+    /// 機能A / ADR-6: 開始→停止までの境界時刻が `currentSessionTimes` で取得できる
+    /// （`stop()` の API 戻り値は不変・既存テスト維持）。startedAt < stoppedAt。
+    @Test("currentSessionTimes は start→stop の境界時刻を返す（機能A / ADR-6・stop の API 不変）")
+    func currentSessionTimesAreRecorded() async {
+        let service = makeService(
+            permission: FakePermissionGate(initial: .granted),
+            audio: FakeAudioSource(frames: [.dummy()]),
+            recognizer: FakeSpeechRecognizer(results: []),
+            sink: SpyTranscriptSink()
+        )
+        // start 前は nil。
+        #expect(await service.currentSessionTimes == nil)
+
+        await service.start(app: AppId("a"))
+        // running になった直後は stoppedAt 未確定で nil。
+        #expect(await service.currentSessionTimes == nil)
+
+        await service.stop()
+        let times = await service.currentSessionTimes
+        #expect(times != nil)
+        if let times {
+            #expect(times.startedAt <= times.stoppedAt)
+        }
+    }
+
     /// Should-3: 認識/タップのストリームが error 終端すると error 状態へ遷移し、
     /// audioSource.stop() でリソース解放される（状態遷移図 running → error）。
     @Test("認識ストリームが error 終端すると error 状態になりリソース解放される")

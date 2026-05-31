@@ -37,6 +37,14 @@ public actor TranscriptionService {
     private var volatileCount: Int = 0
     private var finalizedCount: Int = 0
 
+    /// 現セッションの境界時刻（機能A / ADR-6）。
+    /// `start` 成功時に Date() を記録し、`stop` 完了時に stoppedAt をスナップショットする。
+    /// 読み取り用ゲッタ `currentSessionTimes` を公開し、presentation（StopFlowCoordinator）が
+    /// `store.snapshotCurrentSession(...)` を組み立てる際に使う。
+    /// 注: `TranscriptionService.stop()` の API は不変（戻り値や追加コールバックを増やさない）。
+    private var _startedAt: Date?
+    private var _stoppedAt: Date?
+
     public init(
         audioSource: AudioSource,
         recognizer: SpeechRecognizer,
@@ -56,6 +64,15 @@ public actor TranscriptionService {
     }
 
     public var transcriptStore: TranscriptStore { store }
+
+    /// 現セッションの境界時刻（機能A / ADR-6）。
+    /// 直近の `start` が成功してから `stop` 完了するまでの時刻ペアを返す。
+    /// 1 度も start していない場合や、stop が未完了の場合は nil（または stoppedAt 未確定で nil）。
+    /// presentation の `StopFlowCoordinator` が `.stopped` 遷移を検知して読み取る用途。
+    public var currentSessionTimes: (startedAt: Date, stoppedAt: Date)? {
+        guard let s = _startedAt, let e = _stoppedAt else { return nil }
+        return (s, e)
+    }
 
     public func setStateChangeHandler(_ handler: @escaping @Sendable (SessionState) -> Void) {
         self.onStateChange = handler
@@ -100,6 +117,9 @@ public actor TranscriptionService {
             eventLogger.log("audioSource.start succeeded for \(app.rawValue)")
             generation += 1
             let myGeneration = generation
+            // 機能A / ADR-6: セッション境界の開始時刻を記録（次回 stop で stoppedAt を組む）。
+            _startedAt = Date()
+            _stoppedAt = nil
             transition(to: .running(app))
 
             let results = recognizer.transcribe(audioStream, locale: locale)
@@ -194,6 +214,8 @@ public actor TranscriptionService {
             return
         }
 
+        // 機能A / ADR-6: セッション境界の停止時刻を記録（presentation が currentSessionTimes で読む）。
+        _stoppedAt = Date()
         transition(to: .stopped)
     }
 

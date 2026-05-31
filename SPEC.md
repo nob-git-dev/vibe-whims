@@ -246,6 +246,7 @@ macOS のアプリごとの音声をキャプチャし、Apple の SpeechAnalyze
 - **Composition Root への注入順序（機能A/B/C）** — **Resolved（→ ADR-5 / ADR-6 / 「### Composition Root 注入順序（確定）」）**。
   確定: 既存の `TranscriptionService` のコンストラクタは触らず（翻訳は presentation の `DisplayPipeline` に閉じる）、`AppDelegate` で `AppleTranslator` / `AppleLanguageDetector` / `DisplayPipeline` / `DownloadsSessionExporter` / `StopFlowCoordinator` を順に生成・配線する。詳細は「## アーキテクチャ設計 → ### Composition Root 注入順序（確定）」参照。
 - **ADR-5 / ADR-6 の追記（/architect）** — **Resolved**。「## アーキテクチャ設計 / ADR」セクションに ADR-5・ADR-6 を追加済み。
+- **実装側からの確認（/tdd 2026-05-31）** — **Resolved**。Red→Green→Refactor で機能 A/B/C を実装。`TranscriptionService.stop()` の API は不変（戻り値・例外・コールバック全て既存と同じ）。`Translator` / `LanguageDetector` / `SessionExporter` の 3 つの新 port を Foundation のみで追加し、`TranscriptStore` に `snapshotCurrentSession(startedAt:stoppedAt:) -> TranscriptSession` / `clearDisplay()` を追加（`clearDisplay` は **TranscriptSink には何も発行しない** ことを SpyTranscriptSink で検証済み）。`DisplayPipeline` は OS/UI 非依存のため domain ターゲットに置く判断とした（実装側からの設計改善・固定要件「domain は OS/UI 非依存」と整合・テスト容易性を最大化）。`DownloadsSessionExporter` は秒精度衝突時に `-2`/`-3` サフィックスで安全側に倒すロジックを実装し一時ディレクトリで検証 PASS。`AppleTranslator` は macOS 26 の Translation framework API が実機未確定のためコンパイル通過するスケルトン（throw → DisplayPipeline の原文フォールバック経路を駆動）。`AppleLanguageDetector` は `NLLanguageRecognizer` を使用。Composition Root（`AppDelegate`）に `DisplayPipeline` / `DownloadsSessionExporter` / `StopFlowCoordinator` を順に生成・配線。**既存 30 テスト全 PASS** + **新規 14 テスト PASS** = 合計 44 tests / 9 suites（`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ・`swift build -c release` 成功）。
 
 ### 実機検証で確定する事項（決め打ちしない）
 
@@ -997,23 +998,46 @@ Tests/
 | **【ADR-4】複数 append の順序保持（取りこぼし・順序崩れ防止）** | `複数 append が順にファイル末尾に積まれる（順序保持・ADR-4）` | PASS |
 | **【ADR-4】flush を呼ばない停止（クラッシュ模擬）でも確定済み分が残る** | `停止せず（flush を呼ばずに）読んでも内容が見える（クラッシュ模擬・ADR-4）` | PASS |
 | **【ADR-4】親ディレクトリ未存在でも append 単独で作成して書ける（flush に依存しない）** | `親ディレクトリが無くても append 時点で作成して書ける（ADR-4・親ディレクトリ作成は append 側）` | PASS |
+| **【機能A / ADR-6】TranscriptSession 値型（domain・Foundation のみ）** | `TranscriptSession 値型は segments / startedAt / stoppedAt を保持する（Foundation のみ）` | PASS |
+| **【機能A / ADR-6】snapshotCurrentSession が現セッションの確定列＋時刻を返す（store は不変）** | `snapshotCurrentSession は現セッションの finalized 列と時刻を含む TranscriptSession を返す（store は不変）` | PASS |
+| **【機能A / ADR-6】clearDisplay は表示用バッファをクリアする** | `clearDisplay は表示用バッファをクリアする（_finalized / _volatile 両方）` | PASS |
+| **【機能A / ADR-6・固定要件】clearDisplay は TranscriptSink に一切触れない（メイン append 経路不変）** | `clearDisplay は TranscriptSink には何の操作も発行しない（保存経路を一切触らない・固定要件）` | PASS |
+| **【機能A / ADR-6】currentSessionTimes は start→stop の境界時刻を返す（stop API 不変）** | `currentSessionTimes は start→stop の境界時刻を返す（機能A / ADR-6・stop の API 不変）` | PASS |
+| **【機能A / ADR-6】Downloads セッション複本: タイムスタンプ付きファイル名 + 1セグメント=1行 UTF-8** | `セッション分の確定テキストを 1 セグメント = 1 行で UTF-8 書き出す（タイムスタンプ付きファイル名）` | PASS |
+| **【機能A / ADR-6】秒精度衝突時の -2, -3 サフィックスで上書き禁止** | `秒精度の衝突時は -2, -3 のサフィックスで回避し既存ファイルを上書きしない` | PASS |
+| **【機能A / ADR-6】空セッションでも空ファイルが作成される（上書き禁止は維持）** | `空セッション（segments 0 件）でも空ファイルが作成される（上書き禁止は維持）` | PASS |
+| **【機能B / ADR-5】日本語の finalized は翻訳せず原文表示** | `finalized が日本語と検出されたら翻訳せず原文を表示する（日本語はそのまま）` | PASS |
+| **【機能B / ADR-5】非日本語の finalized は Translator.translate で日本語訳に変換** | `finalized が非日本語（英語）と検出されたら Translator.translate で日本語訳を表示用テキストにする` | PASS |
+| **【機能B / ADR-5】翻訳失敗時は原文フォールバック（黙って空表示にしない）** | `Translator.translate が throw したら原文にフォールバックする（黙って空表示にしない）` | PASS |
+| **【機能B / ADR-5】LanguageDetector が判定不能（nil）でも原文フォールバック** | `LanguageDetector が判定不能（nil）なら原文表示にフォールバック（『日本語ではない』とは扱わない）` | PASS |
+| **【機能B / ADR-5】volatile は翻訳しない（常に原文）** | `volatile は翻訳しない（常に原文をそのまま表示する・ADR-5）` | PASS |
+| **【機能B / ADR-5・固定要件】TranscriptSink.append には常に原文（経路分離）** | `TranscriptSink.append には常に原文が渡る（DisplayPipeline は保存経路を一切触らない）` | PASS |
 
 ### テスト環境
 
 - フレームワーク: Swift Testing（`import Testing`）
 - 環境: 実機・OS API・権限なしで完結（fake port 注入のみ）。ConfigLoader / FileTranscriptSink テストは一時ディレクトリ（一部はホーム配下のユニーク一時ディレクトリ）にファイル生成→破棄。
 - 実行コマンド: `swift test` / 警告ゼロ確認: `swift build -Xswiftc -strict-concurrency=complete`
-- 結果: **30 tests / 6 suites すべて PASS**（macOS 26.5 / Swift 6.3.2）。`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ。`swift build -c release` 成功。
+- 結果: **44 tests / 9 suites すべて PASS**（macOS 26.5 / Swift 6.3.2）。`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ。`swift build -c release` 成功。
   - レビュー差し戻し対応で **+6 tests / +1 suite**（FileTranscriptSinkTests）を追加。Must-1（finalize 取りこぼし防止）・Should-2（start 直接検証）・Should-3（error 経路）・FileTranscriptSink 群を Red→Green で実装。
   - 実機ログで断定した不具合修正で **+4 tests / +1 suite**（AudioFormatConverterTests 3 件 + TranscriptionServiceTests 1 件）。音声フォーマット変換（Int16 対応）と表示のリアルタイム更新を Red→Green→Refactor で実装。
   - **ADR-4（クラッシュ耐性のための即時 append 化）対応で +4 tests**（FileTranscriptSinkTests に追加）。`FileTranscriptSink.append` のメモリバッファを廃止し、毎回ファイル末尾に追記する実装に変更。`flush()` は契約上残しつつ no-op 化。`TranscriptSink` protocol のシグネチャは不変（domain テスト 22 件全 PASS を維持）。
+  - **機能A/B/C（ADR-5 / ADR-6）対応で +14 tests / +3 suites**（TranscriptSessionAndStoreTests 4 件・DisplayPipelineTests 6 件・DownloadsSessionExporterTests 3 件 + TranscriptionServiceTests 1 件）。新規 port（`Translator` / `LanguageDetector` / `SessionExporter`）追加と、TranscriptStore 拡張（`snapshotCurrentSession` / `clearDisplay`）、TranscriptionService 拡張（`currentSessionTimes`・stop API 不変）、`DisplayPipeline`（domain・OS 非依存）、`DownloadsSessionExporter`（infra）、`AppleTranslator` / `AppleLanguageDetector`（infra スケルトン）、`StopFlowCoordinator`（presentation）を Red→Green→Refactor で実装。**TranscriptionService.stop の API は不変・既存 30 テスト全 PASS 維持**。`AppleTranslator` の Apple Translation framework API は実機検証で確定する未確定事項のため throw（→ 原文フォールバック）に留めるスケルトン。
 
 ### カバー範囲
 
-- **domain（TDD で厚く）**: 値型、port protocol、`TranscriptStore`（volatile/finalized 分離）、
-  `TranscriptionService`（全状態遷移・権限分岐・取りこぼし防止・**停止時 finalize→drain→flush**・停止後不追記・**認識ストリーム error 終端からの error 遷移**）。
-- **infrastructure（OS 非依存部のみテスト）**: `ConfigLoader`（設定外部化）、`FileTranscriptSink`（親ディレクトリ作成・追記・保存失敗のエラー伝播・`~` 展開）。
-- **アーキテクチャ**: domain の OS/UI 非 import をソース走査でガード。逆依存はコンパイル時に不可能化（確認済み）。
+- **domain（TDD で厚く）**: 値型（`TranscriptSession` 追加）、port protocol（`Translator` / `LanguageDetector` / `SessionExporter` 追加）、`TranscriptStore`（volatile/finalized 分離 + `snapshotCurrentSession` / `clearDisplay` で **TranscriptSink を触らない**ことを Spy 検証）、`TranscriptionService`（全状態遷移・権限分岐・取りこぼし防止・**停止時 finalize→drain→flush**・停止後不追記・**認識ストリーム error 終端からの error 遷移** + `currentSessionTimes`：stop の API 不変）、**`DisplayPipeline`**（言語検出→必要時のみ翻訳→表示用テキスト・volatile は翻訳しない・翻訳失敗時原文フォールバック・**保存経路 TranscriptSink には触れない**）。
+- **infrastructure（OS 非依存部のみテスト）**: `ConfigLoader`（設定外部化）、`FileTranscriptSink`（親ディレクトリ作成・追記・保存失敗のエラー伝播・`~` 展開）、`DownloadsSessionExporter`（タイムスタンプ付きファイル名生成・秒精度衝突時の `-2`/`-3` サフィックス・上書き禁止・1セグメント=1行 UTF-8）。
+- **アーキテクチャ**: domain の OS/UI 非 import をソース走査でガード。逆依存はコンパイル時に不可能化（確認済み）。新規 port（`Translator` / `LanguageDetector` / `SessionExporter`）はいずれも Foundation のみで OS 型を漏らさず、ガードテストを引き続き PASS。
+
+### 機能C（ピン）のテスト方針
+
+- **GUI 直接テストは行わない**（SPEC「ピン（機能C）の設計メモ」と整合）。`TranscriptWindowController.togglePin` は AppKit `NSWindow` に依存し、テスト用に headless で `NSWindow` を作る価値が薄いため、手動検証で担保する。
+- 手動検証チェックリスト（実機・/deploy で確認）:
+  - [ ] ピンボタン押下でウィンドウが最前面（`window.level = .floating`）になる。
+  - [ ] 再度押下で最前面状態が解除（`.normal`）される。
+  - [ ] ボタンアイコン（`pin` / `pin.fill`）と `state`（`.on` / `.off`）でピン中が視覚的に区別できる。
+  - [ ] アプリ再起動後は OFF で開始する（`isRestorable = false` / UserDefaults 不使用）。
 
 ### infrastructure 手動検証項目（ユニットテストで担保できない＝実機検証が必要）
 
@@ -1034,7 +1058,10 @@ Tests/
 / `AudioFormatConverter` は OS API 接触の実装を TODO とし、ビルドが通る最小スケルトンに留める。
 `SpeechAnalyzerAdapter` は `finalize()` の protocol 適合を追加済み（実体は `SpeechAnalyzer.finalizeAndFinish(through:)` 等での実機結線 TODO。`transcribe` は `AsyncThrowingStream` 化し、異常終了は `finish(throwing:)` で domain へ伝播する旨を TODO コメントに明記）。
 `FileTranscriptSink` / `ConfigLoader` は OS 非依存に近く実装済み・テスト済み（FileTranscriptSink は親ディレクトリ作成・保存失敗のエラー伝播・`~` 展開を含む）。
-presentation の実 @main アプリ・メニューバー UI は /deploy フェーズで Xcode app target として構築する。
+`DownloadsSessionExporter` も OS 非依存に近く実装済み・テスト済み（タイムスタンプ生成・衝突回避・1セグメント=1行 UTF-8）。
+`AppleLanguageDetector` は `NLLanguageRecognizer` を使用する薄いアダプタとして実装済み（confidence しきい値 0.5 を暫定値として実機検証で確定する）。
+**`AppleTranslator` は macOS 26 の Translation framework 正式 API シグネチャが実機検証で確定するまでスケルトン**（`translate` / `ensureAvailable` を `TranslationError.notImplemented` で throw する。`DisplayPipeline` 側のフォールバック経路で原文表示にされる）。`#if canImport(Translation)` で Translation モジュールを import 可能だが、実 API 呼び出しは TODO コメントで方針を残してある。**クラウド送信を一切行わない実装方針** を当該ファイルのコメントで明示し、`URLSession` / ネットワーク API を一切 import していないことで構造的に担保する。
+presentation の実 @main アプリ・メニューバー UI（ピンボタン含む）・`StopFlowCoordinator`・Composition Root 配線は実装済み（手動検証で `.app` バンドル化・署名は /deploy フェーズへ）。
 
 ## レビュー結果
 <!-- /review が追記 -->
