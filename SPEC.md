@@ -1201,6 +1201,9 @@ ADR-7 は domain を fake で厚く TDD する。ADR-8 はプロセス集約の*
 | **【ADR-8】ブラウザ相当（ヘルパー別 PID）でも responsiblePID 経由で対象アプリのプロセス群が集まる** | `responsiblePID が対象アプリのメイン PID を指すヘルパーは集約に含まれる（メイン無音問題の根治）` | PASS |
 | **【ADR-8・非混入】対象 bundleId 名前空間配下のヘルパー（`<target>.` 始まり）は含み、似た接頭辞の別アプリは除外** | `対象 bundleId の名前空間配下のヘルパーは含み、他アプリは除外（非混入を維持）` | PASS |
 | **【ADR-8】対象プロセスが 1 つも無い場合は空配列（呼び出し側で従来どおり失敗扱い）** | `対象プロセスが 1 つも無い場合は空配列を返す` | PASS |
+| **【ADR-8・Should-1 の核心=ブラウザ捕捉】bundleId=nil のレンダラーでも responsiblePID が対象メイン PID を指せば採用される** | `responsiblePID が対象メイン PID に一致する bundleId=nil のレンダラーは集約に含まれる（NSRunningApplication 非登録のレンダラー捕捉）`（ProcessMatcher 純粋関数 + fake） | PASS |
+| **【ADR-8・Should-1 の非混入担保】responsiblePID が別アプリのメイン PID を指すレンダラーは除外される** | `responsiblePID が別アプリのメイン PID に一致する bundleId=nil のプロセスは集約に含めない（他アプリの責任プロセスは混入させない）` | PASS |
+| **【ADR-8・回帰】responsiblePID=nil かつ bundleId=nil の曖昧プロセスは除外される** | `responsiblePID=nil・bundleId=nil の曖昧プロセスは集約に含めない（取得失敗・曖昧は除外側に倒す）` | PASS |
 
 > **ADR-8 の Core Audio 実機接触部分**（`kAudioHardwarePropertyProcessObjectList` / `kAudioProcessPropertyPID` / `responsiblePID` の実取得・`CATapDescription(stereoMixdownOfProcesses:)` への配列受け渡し）は実機・実音声がないと検証できないため、純粋関数 `ProcessMatcher` でマッチング判定のみをユニットテストし、OS API 呼び出しは「### infrastructure 手動検証項目」に記録する。
 
