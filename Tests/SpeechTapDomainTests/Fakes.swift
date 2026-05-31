@@ -165,6 +165,45 @@ final class ManualSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
     }
 }
 
+/// transcribe で受け取った locale を記録する SpeechRecognizer（ADR-7 検証用）。
+/// 「setRecognitionLocale 後に start すると、その locale が transcribe に渡る」ことを直接検証する。
+final class RecordingSpeechRecognizer: SpeechRecognizer, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _localesReceived: [Locale] = []
+    private let results: [RecognitionResult]
+
+    init(results: [RecognitionResult] = []) {
+        self.results = results
+    }
+
+    /// transcribe が受け取った locale 列（呼び出し順）。
+    var localesReceived: [Locale] { lock.lock(); defer { lock.unlock() }; return _localesReceived }
+    /// 直近の transcribe が受け取った locale。
+    var lastLocale: Locale? { localesReceived.last }
+
+    func transcribe(_ audio: AsyncStream<AudioFrame>, locale: Locale) -> AsyncThrowingStream<RecognitionResult, Error> {
+        lock.withLock { _localesReceived.append(locale) }
+        let results = self.results
+        return AsyncThrowingStream { continuation in
+            Task {
+                for await _ in audio {}
+                for r in results { continuation.yield(r) }
+                continuation.finish()
+            }
+        }
+    }
+
+    func finalize() async {}
+}
+
+/// 任意の対応ロケール一覧を返す RecognitionCapabilities（ADR-7 検証用）。
+/// OS 型を漏らさず Foundation の [Locale] のみで動くことを担保する。
+final class FakeRecognitionCapabilities: RecognitionCapabilities, @unchecked Sendable {
+    private let locales: [Locale]
+    init(_ locales: [Locale]) { self.locales = locales }
+    func supportedLocales() async -> [Locale] { locales }
+}
+
 /// 保存（append）と flush を記録する TranscriptSink スパイ。
 actor SpyTranscriptSink: TranscriptSink {
     private(set) var appended: [TranscriptSegment] = []

@@ -23,7 +23,7 @@ import os
 /// - オンデバイスで実際に文字化するか。volatile/finalized が想定通り流れるか。
 /// - bestAvailableAudioFormat への変換が正しいか（タップ native format 依存）。
 /// - 言語モデル未インストール時の AssetInstallationRequest フロー。
-public final class SpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable {
+public final class SpeechAnalyzerAdapter: SpeechRecognizer, RecognitionCapabilities, @unchecked Sendable {
     private let converter = AudioFormatConverter()
     #if canImport(os)
     private let log = AppLog.logger(.analyzer)
@@ -81,6 +81,32 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, @unchecked Sendable 
         }
         #endif
     }
+
+    // MARK: - RecognitionCapabilities（ADR-7）
+
+    /// 認識器がオンデバイスで対応する言語ロケール一覧を返す（ADR-7）。
+    /// `SpeechTranscriber.supportedLocales` を Foundation の `[Locale]` に正規化して返す（OS 型を漏らさない）。
+    /// 取得不能環境（SpeechAnalyzer 非対応・空）では妥当な既定 `[ja-JP, en-US]` を返し、空表示を避ける。
+    public func supportedLocales() async -> [Locale] {
+        #if canImport(Speech)
+        if #available(macOS 26.0, *) {
+            // TODO(実機検証): `SpeechTranscriber.supportedLocales` の正確なシグネチャ（static/instance/async）と
+            //                返却型は macOS 26 実機で確定する（SPEC「ADR-7 で実機検証する事項」）。
+            //                現状の SDK では static プロパティとして `[Locale]` を返すため、それを正規化する。
+            let locales = await SpeechTranscriber.supportedLocales
+            let normalized = locales.map { Locale(identifier: $0.identifier(.bcp47)) }
+            if !normalized.isEmpty { return normalized }
+        }
+        #endif
+        // 取得不能・未対応時の既定（presentation 側で最低限の言語を出すための安全側フォールバック）。
+        return SpeechAnalyzerAdapter.defaultLocales
+    }
+
+    /// 取得不能時に最低限提示する既定ロケール（日本語 / 英語）。
+    static let defaultLocales: [Locale] = [
+        Locale(identifier: "ja-JP"),
+        Locale(identifier: "en-US")
+    ]
 
     #if canImport(Speech)
     @available(macOS 26.0, *)

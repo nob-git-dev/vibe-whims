@@ -259,6 +259,10 @@ macOS のアプリごとの音声をキャプチャし、Apple の SpeechAnalyze
   確定: 既存の `TranscriptionService` のコンストラクタは触らず（翻訳は presentation の `DisplayPipeline` に閉じる）、`AppDelegate` で `AppleTranslator` / `AppleLanguageDetector` / `DisplayPipeline` / `DownloadsSessionExporter` / `StopFlowCoordinator` を順に生成・配線する。詳細は「## アーキテクチャ設計 → ### Composition Root 注入順序（確定）」参照。
 - **ADR-5 / ADR-6 の追記（/architect）** — **Resolved**。「## アーキテクチャ設計 / ADR」セクションに ADR-5・ADR-6 を追加済み。
 - **実装側からの確認（/tdd 2026-05-31）** — **Resolved**。Red→Green→Refactor で機能 A/B/C を実装。`TranscriptionService.stop()` の API は不変（戻り値・例外・コールバック全て既存と同じ）。`Translator` / `LanguageDetector` / `SessionExporter` の 3 つの新 port を Foundation のみで追加し、`TranscriptStore` に `snapshotCurrentSession(startedAt:stoppedAt:) -> TranscriptSession` / `clearDisplay()` を追加（`clearDisplay` は **TranscriptSink には何も発行しない** ことを SpyTranscriptSink で検証済み）。`DisplayPipeline` は OS/UI 非依存のため domain ターゲットに置く判断とした（実装側からの設計改善・固定要件「domain は OS/UI 非依存」と整合・テスト容易性を最大化）。`DownloadsSessionExporter` は秒精度衝突時に `-2`/`-3` サフィックスで安全側に倒すロジックを実装し一時ディレクトリで検証 PASS。`AppleTranslator` は macOS 26 の Translation framework API が実機未確定のためコンパイル通過するスケルトン（throw → DisplayPipeline の原文フォールバック経路を駆動）。`AppleLanguageDetector` は `NLLanguageRecognizer` を使用。Composition Root（`AppDelegate`）に `DisplayPipeline` / `DownloadsSessionExporter` / `StopFlowCoordinator` を順に生成・配線。**既存 30 テスト全 PASS** + **新規 14 テスト PASS** = 合計 44 tests / 9 suites（`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ・`swift build -c release` 成功）。
+- **ADR-7（認識言語選択）/ ADR-8（マルチプロセスタップ）の実装（/tdd 2026-05-31）** — **Resolved（ユニットテスト可能な範囲）。実機確認は手動検証項目に整理**。
+  - **ADR-7**: domain に `RecognitionCapabilities` port（`supportedLocales() async -> [Locale]`・Foundation のみ）を追加。`TranscriptionService.locale`（`let`）を可変内部状態 `recognitionLocale` に変え、`setRecognitionLocale(_:)`（次回 start から有効）と読み取り用 `currentRecognitionLocale` を追加（`init` 引数・`start`/`stop` の API・状態遷移は不変＝既存テスト全 PASS 維持）。infrastructure では `SpeechAnalyzerAdapter` が `RecognitionCapabilities` を兼ね、`SpeechTranscriber.supportedLocales` を `[Locale]` に正規化（取得不能時は既定 `[ja-JP, en-US]`・TODO で実機確定明記）。presentation（`AppDelegate`）に「認識言語」サブメニュー追加（選択で `setRecognitionLocale`・現在選択をチェック表示・config `LOCALE` が初期既定）。`RecognitionCapabilities` 実装は同一 `SpeechAnalyzerAdapter` インスタンスを domain（認識）と presentation（能力照会）で共用（Composition Root「### 9」順序に従う）。**保存は原文のまま**（認識 locale を変えても `TranscriptSink` に原文が渡ることを SpyTranscriptSink で再確認＝経路分離の回帰防止）。
+  - **ADR-8**: 集約の判定ロジックを純粋関数 `ProcessMatcher`（infrastructure・OS 非接触）に切り出し、対象アプリ所属プロセスのみを「メイン PID 一致 / responsiblePID が対象 / bundleId が対象 or `<target>.` 名前空間配下」で選別（**曖昧は除外側に倒す＝非混入優先**）。`ProcessTapAudioSource.start(app:)` は内部で `kAudioHardwarePropertyProcessObjectList` / `kAudioProcessPropertyPID` から関連プロセス群を集め `ProcessMatcher` で選別し `CATapDescription(stereoMixdownOfProcesses:[…])` に**配列**で渡す（空ならエラー・診断ログを `.tap` info 出力）。単一プロセスアプリはメイン PID が必ず含まれ従来どおり動作。`AudioSource.start(app:)` シグネチャ・domain・presentation・Composition Root は不変。`responsiblePID(for:)` は安定取得 API が実機未確定のため初版 nil（メイン PID / bundleId 名前空間で判定）＝手動検証項目に整理。Core Audio 実機接触部分は手動検証項目（非混入・ブラウザ捕捉）。
+  - **検証**: **既存 44 テスト全 PASS** + **新規 11 テスト PASS（RecognitionLocaleTests 5 / ProcessMatcherTests 6）** = 合計 **55 tests / 11 suites**（`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ・`swift build -c release` 成功）。
 
 ### 実機検証で確定する事項（決め打ちしない）
 
@@ -1195,6 +1199,8 @@ ADR-7 は domain を fake で厚く TDD する。ADR-8 はプロセス集約の*
 | **【ADR-8・非混入】曖昧（bundleId 取得不能・判定不可）なプロセスは除外側に倒す** | `bundleId 不明・どの基準にも明確に該当しないプロセスは集約に含めない（偽陽性で他アプリ音を混ぜない）` | PASS |
 | **【ADR-8】単一プロセスアプリは従来どおりメイン PID が必ず含まれる（既存挙動を壊さない）** | `関連プロセスがメイン 1 つだけのアプリでも、メイン PID の AudioObjectID が集約に含まれる` | PASS |
 | **【ADR-8】ブラウザ相当（ヘルパー別 PID）でも responsiblePID 経由で対象アプリのプロセス群が集まる** | `responsiblePID が対象アプリのメイン PID を指すヘルパーは集約に含まれる（メイン無音問題の根治）` | PASS |
+| **【ADR-8・非混入】対象 bundleId 名前空間配下のヘルパー（`<target>.` 始まり）は含み、似た接頭辞の別アプリは除外** | `対象 bundleId の名前空間配下のヘルパーは含み、他アプリは除外（非混入を維持）` | PASS |
+| **【ADR-8】対象プロセスが 1 つも無い場合は空配列（呼び出し側で従来どおり失敗扱い）** | `対象プロセスが 1 つも無い場合は空配列を返す` | PASS |
 
 > **ADR-8 の Core Audio 実機接触部分**（`kAudioHardwarePropertyProcessObjectList` / `kAudioProcessPropertyPID` / `responsiblePID` の実取得・`CATapDescription(stereoMixdownOfProcesses:)` への配列受け渡し）は実機・実音声がないと検証できないため、純粋関数 `ProcessMatcher` でマッチング判定のみをユニットテストし、OS API 呼び出しは「### infrastructure 手動検証項目」に記録する。
 
@@ -1203,17 +1209,20 @@ ADR-7 は domain を fake で厚く TDD する。ADR-8 はプロセス集約の*
 - フレームワーク: Swift Testing（`import Testing`）
 - 環境: 実機・OS API・権限なしで完結（fake port 注入のみ）。ConfigLoader / FileTranscriptSink テストは一時ディレクトリ（一部はホーム配下のユニーク一時ディレクトリ）にファイル生成→破棄。
 - 実行コマンド: `swift test` / 警告ゼロ確認: `swift build -Xswiftc -strict-concurrency=complete`
-- 結果: **44 tests / 9 suites すべて PASS**（macOS 26.5 / Swift 6.3.2）。`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ。`swift build -c release` 成功。
+- 結果: **55 tests / 11 suites すべて PASS**（macOS 26.5 / Swift 6.3.2）。`swift build -Xswiftc -strict-concurrency=complete` 警告ゼロ。`swift build -c release` 成功。
   - レビュー差し戻し対応で **+6 tests / +1 suite**（FileTranscriptSinkTests）を追加。Must-1（finalize 取りこぼし防止）・Should-2（start 直接検証）・Should-3（error 経路）・FileTranscriptSink 群を Red→Green で実装。
   - 実機ログで断定した不具合修正で **+4 tests / +1 suite**（AudioFormatConverterTests 3 件 + TranscriptionServiceTests 1 件）。音声フォーマット変換（Int16 対応）と表示のリアルタイム更新を Red→Green→Refactor で実装。
   - **ADR-4（クラッシュ耐性のための即時 append 化）対応で +4 tests**（FileTranscriptSinkTests に追加）。`FileTranscriptSink.append` のメモリバッファを廃止し、毎回ファイル末尾に追記する実装に変更。`flush()` は契約上残しつつ no-op 化。`TranscriptSink` protocol のシグネチャは不変（domain テスト 22 件全 PASS を維持）。
   - **機能A/B/C（ADR-5 / ADR-6）対応で +14 tests / +3 suites**（TranscriptSessionAndStoreTests 4 件・DisplayPipelineTests 6 件・DownloadsSessionExporterTests 3 件 + TranscriptionServiceTests 1 件）。新規 port（`Translator` / `LanguageDetector` / `SessionExporter`）追加と、TranscriptStore 拡張（`snapshotCurrentSession` / `clearDisplay`）、TranscriptionService 拡張（`currentSessionTimes`・stop API 不変）、`DisplayPipeline`（domain・OS 非依存）、`DownloadsSessionExporter`（infra）、`AppleTranslator` / `AppleLanguageDetector`（infra スケルトン）、`StopFlowCoordinator`（presentation）を Red→Green→Refactor で実装。**TranscriptionService.stop の API は不変・既存 30 テスト全 PASS 維持**。`AppleTranslator` の Apple Translation framework API は実機検証で確定する未確定事項のため throw（→ 原文フォールバック）に留めるスケルトン。
+  - **ADR-7（認識言語選択）/ ADR-8（マルチプロセスタップ）対応で +11 tests / +2 suites**（RecognitionLocaleTests 5 件・ProcessMatcherTests 6 件）を Red→Green→Refactor で実装。
+    - **ADR-7（domain・fake で厚く）**: 新規 port `RecognitionCapabilities`（Foundation のみ）を追加。`TranscriptionService.locale`（`let`）を可変内部状態 `recognitionLocale` に変え、`setRecognitionLocale(_:)`（次回 start から有効）と読み取り用 `currentRecognitionLocale` を追加。`init` 引数・`start`/`stop` の API・状態遷移は不変。`RecordingSpeechRecognizer`（受領 locale を記録する fake）で「選んだ locale が transcribe に渡る／既定は config locale／実行中変更は次回 start 反映」を検証。`SpyTranscriptSink` で「認識 locale を変えても保存は原文」を再確認（経路分離の回帰防止）。infrastructure では `SpeechAnalyzerAdapter` を `RecognitionCapabilities` に適合させ `SpeechTranscriber.supportedLocales` を `[Locale]` に正規化（取得不能時は既定 `[ja-JP, en-US]`・TODO で実機確定明記）。presentation（`AppDelegate`）に「認識言語」サブメニューを追加（選択で `setRecognitionLocale`・現在選択をチェック表示・config LOCALE が初期既定）。
+    - **ADR-8（非混入の判定ロジックを純粋関数でテスト）**: 集約判定を `ProcessMatcher`（純粋関数）に切り出し、fake のプロセス一覧（PID + bundleId + responsiblePID）に対して「対象アプリ所属のみ選ぶ・他アプリ除外・曖昧は除外側・単一プロセス互換・ヘルパー捕捉・bundleId 名前空間配下の捕捉」を検証。`ProcessTapAudioSource` は `kAudioHardwarePropertyProcessObjectList` / `kAudioProcessPropertyPID` で関連プロセス群を集め `ProcessMatcher` で選別し `CATapDescription(stereoMixdownOfProcesses:[…])` に配列で渡す（空ならエラー・診断ログを `.tap` に info 出力）。`AudioSource.start(app:)` シグネチャは不変。Core Audio 実機接触部分は手動検証項目（非混入・ブラウザ捕捉）。
 
 ### カバー範囲
 
-- **domain（TDD で厚く）**: 値型（`TranscriptSession` 追加）、port protocol（`Translator` / `LanguageDetector` / `SessionExporter` 追加）、`TranscriptStore`（volatile/finalized 分離 + `snapshotCurrentSession` / `clearDisplay` で **TranscriptSink を触らない**ことを Spy 検証）、`TranscriptionService`（全状態遷移・権限分岐・取りこぼし防止・**停止時 finalize→drain→flush**・停止後不追記・**認識ストリーム error 終端からの error 遷移** + `currentSessionTimes`：stop の API 不変）、**`DisplayPipeline`**（言語検出→必要時のみ翻訳→表示用テキスト・volatile は翻訳しない・翻訳失敗時原文フォールバック・**保存経路 TranscriptSink には触れない**）。
-- **infrastructure（OS 非依存部のみテスト）**: `ConfigLoader`（設定外部化）、`FileTranscriptSink`（親ディレクトリ作成・追記・保存失敗のエラー伝播・`~` 展開）、`DownloadsSessionExporter`（タイムスタンプ付きファイル名生成・秒精度衝突時の `-2`/`-3` サフィックス・上書き禁止・1セグメント=1行 UTF-8）。
-- **アーキテクチャ**: domain の OS/UI 非 import をソース走査でガード。逆依存はコンパイル時に不可能化（確認済み）。新規 port（`Translator` / `LanguageDetector` / `SessionExporter`）はいずれも Foundation のみで OS 型を漏らさず、ガードテストを引き続き PASS。
+- **domain（TDD で厚く）**: 値型（`TranscriptSession` 追加）、port protocol（`Translator` / `LanguageDetector` / `SessionExporter` / **`RecognitionCapabilities`（ADR-7）** 追加）、`TranscriptStore`（volatile/finalized 分離 + `snapshotCurrentSession` / `clearDisplay` で **TranscriptSink を触らない**ことを Spy 検証）、`TranscriptionService`（全状態遷移・権限分岐・取りこぼし防止・**停止時 finalize→drain→flush**・停止後不追記・**認識ストリーム error 終端からの error 遷移** + `currentSessionTimes`：stop の API 不変 + **`setRecognitionLocale` で選んだ locale が次回 start の transcribe に渡る・既定は config locale・認識 locale を変えても保存は原文（ADR-7）**）、**`DisplayPipeline`**（言語検出→必要時のみ翻訳→表示用テキスト・volatile は翻訳しない・翻訳失敗時原文フォールバック・**保存経路 TranscriptSink には触れない**）。
+- **infrastructure（OS 非依存部のみテスト）**: `ConfigLoader`（設定外部化）、`FileTranscriptSink`（親ディレクトリ作成・追記・保存失敗のエラー伝播・`~` 展開）、`DownloadsSessionExporter`（タイムスタンプ付きファイル名生成・秒精度衝突時の `-2`/`-3` サフィックス・上書き禁止・1セグメント=1行 UTF-8）、**`ProcessMatcher`（ADR-8・純粋関数）**（対象アプリ所属プロセスのみ選別・他アプリ除外・曖昧は除外側・単一プロセス互換・responsiblePID/bundleId 名前空間配下のヘルパー捕捉＝非混入の判定ロジックをテストで担保）。
+- **アーキテクチャ**: domain の OS/UI 非 import をソース走査でガード。逆依存はコンパイル時に不可能化（確認済み）。新規 port（`Translator` / `LanguageDetector` / `SessionExporter` / **`RecognitionCapabilities`**）はいずれも Foundation のみで OS 型を漏らさず、ガードテストを引き続き PASS。
 
 ### 機能C（ピン）のテスト方針
 
@@ -1236,6 +1245,22 @@ ADR-7 は domain を fake で厚く TDD する。ADR-8 はプロセス集約の*
 - [ ] `RunningAppProvider` が PID→AudioObjectID 変換に必要な情報を含めて TargetApp を列挙できるか。
 - [ ] I/O コールバックがリアルタイムスレッドでブロッキング・メモリ確保しない実装になっているか（オーディオドロップアウト確認）。
 - [ ] 署名・Hardened Runtime・Info.plist（`NSAudioCaptureUsageDescription`）で TCC ダイアログが正しく出るか（→ /deploy）。
+
+#### ADR-7（認識言語選択）の手動検証項目（実機）
+
+- [ ] **認識言語=英語で英語ポッドキャストが正しく認識されるか**（単一ロケール固定による支離滅裂な誤認識の解消確認＝①の修正確認）。
+- [ ] 「認識言語」サブメニューで選んだ言語が**次回の文字化開始時**に反映されるか（実行中は当該セッション不変・次回 start で有効）。
+- [ ] config の `LOCALE` が起動時の初期選択（チェックマーク）として尊重されているか。
+- [ ] `SpeechTranscriber.supportedLocales` の実機での正確なシグネチャ・返却型（static/instance/async）と `[Locale]` 正規化結果（`SpeechAnalyzerAdapter.supportedLocales()` の TODO）。
+- [ ] **言語パック未インストール言語を選んだ際のダウンロード挙動**（`AssetInventory.assetInstallationRequest` のダイアログ・準備中/取得失敗の状態行通知が出るか・黙って無音にならないか）。
+
+#### ADR-8（マルチプロセスタップ）の手動検証項目（実機）
+
+- [ ] **Chrome（YouTube 等）で音声が捕捉されるか**（メイン PID のみのタップで無音だった②の修正確認）。
+- [ ] **【最重要・非混入の再確認】複数プロセス集約後も他アプリ・マイク・システム音が混入しないか**（ブラウザのヘルパー集約時に対象アプリ所属プロセスのみが含まれること）。
+- [ ] `responsiblePID` の安定取得 API（libproc / Core Audio）の確定。初版は `ProcessTapAudioSource.responsiblePID(for:)` が nil を返し、メイン PID 一致 / bundleId 名前空間（`<target>.` 始まり）一致のみで判定する（曖昧は除外）。Chrome Helper（独立 bundleId）の取りこぼしが起きるか実機で確認し、必要なら responsiblePID 取得を実装する。
+- [ ] 開始後に生成される動的レンダラープロセスへの追従の要否（初版は start 時点の関連プロセス群で完結）。
+- [ ] 複数プロセス集約時の `CATapDescription` ミックスダウン挙動・native format の実値。集約対象の一部プロセス消滅時のタップ/Aggregate Device の堅牢性。
 
 ### 未実装（スケルトンのみ・実機検証フェーズで結線）
 

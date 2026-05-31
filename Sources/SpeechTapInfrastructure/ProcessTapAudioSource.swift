@@ -12,13 +12,14 @@ import AppKit
 import os
 #endif
 
-/// AudioSource 実装: Core Audio Process Tap（ADR-1）。
-/// PID → AudioObjectID（kAudioHardwarePropertyTranslatePIDToProcessObject）→ CATapDescription（対象プロセス限定）
-/// → Aggregate Device を構成し、対象アプリ出力のみをタップする。
-/// OS 型 ⇔ domain 値型（AudioFrame）の変換境界をここに置く。
+/// AudioSource 実装: Core Audio Process Tap（ADR-1 / ADR-8）。
+/// 対象アプリの**関連プロセス群**の AudioObjectID を集約（ADR-8: ブラウザ等のヘルパープロセス対応）し、
+/// `CATapDescription(stereoMixdownOfProcesses:[…])` → Aggregate Device を構成して対象アプリ出力のみをタップする。
+/// OS 型 ⇔ domain 値型（AudioFrame）の変換境界をここに置く。`AudioSource.start(app:)` のシグネチャは不変。
 ///
 /// 【最重要本質】対象アプリ音声のみを供給し、他アプリ・マイク・システム音を混入させないこと。
-/// → `CATapDescription(stereoMixdownOfProcesses:)` で対象プロセスのみを含むタップを作る
+/// → 集約は `ProcessMatcher`（純粋関数）で「対象アプリ所属プロセスのみ・曖昧は除外側」に判定し、
+///   `CATapDescription(stereoMixdownOfProcesses:)` で対象プロセス群のみを含むタップを作る
 ///   （グローバルタップ・除外タップは使わない）ことで構造的に非混入を担保する設計。
 ///
 /// 設計（リアルタイム制約）:
@@ -84,14 +85,23 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
         tapLog.info("start: app=\(app.rawValue, privacy: .public) resolved pid=\(pid)")
         #endif
 
-        // 2. PID → AudioObjectID（オーディオプロセスオブジェクト）。
-        let processObjectID = try translatePIDToAudioObject(pid)
+        // 2. 対象アプリの**関連プロセス群**の AudioObjectID を集約する（ADR-8: ブラウザ等のヘルパー対応）。
+        //    非混入の本質: 対象アプリ所属プロセスのみ。曖昧は除外側に倒す（ProcessMatcher）。
+        let targetBundleId = bundleIdentifier(for: pid)
+        let processObjectIDs = try resolveTargetProcessObjects(mainPID: pid, bundleId: targetBundleId)
+        guard !processObjectIDs.isEmpty else {
+            // 対象プロセスが 1 つも見つからない（従来どおり解決失敗として扱う）。
+            #if canImport(os)
+            tapLog.error("no target audio process objects found for pid=\(pid)")
+            #endif
+            throw AudioTapError.pidTranslationFailed(noErr)
+        }
         #if canImport(os)
-        tapLog.info("translated pid=\(pid) -> processObjectID=\(processObjectID)")
+        tapLog.info("aggregated \(processObjectIDs.count) target process object(s): \(processObjectIDs.map(String.init).joined(separator: ","), privacy: .public)")
         #endif
 
-        // 3. CATapDescription（対象プロセスのみ＝非混入）。出力を素通しのままタップ（unmuted）。
-        let tapDescription = CATapDescription(stereoMixdownOfProcesses: [processObjectID])
+        // 3. CATapDescription（対象プロセス群のみ＝非混入）。出力を素通しのままタップ（unmuted）。
+        let tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
         tapDescription.uuid = UUID()
         tapDescription.muteBehavior = CATapMuteBehavior.unmuted
 
@@ -237,6 +247,116 @@ public final class ProcessTapAudioSource: AudioSource, @unchecked Sendable {
             throw AudioTapError.pidTranslationFailed(status)
         }
         return objectID
+    }
+
+    // MARK: - 関連プロセス群の集約（ADR-8）
+
+    /// 対象アプリの関連プロセス群の AudioObjectID 配列を集約する（非混入: 対象所属のみ・曖昧は除外）。
+    /// 1. kAudioHardwarePropertyProcessObjectList で全オーディオプロセスオブジェクトを取得。
+    /// 2. 各オブジェクトの PID / bundleId / responsiblePID を収集。
+    /// 3. ProcessMatcher（純粋関数）で対象アプリ所属のみを選別。
+    /// 取得に失敗した場合は、従来動作（メイン PID 単体タップ）に安全側フォールバックする。
+    private func resolveTargetProcessObjects(mainPID: pid_t, bundleId: String?) throws -> [AudioObjectID] {
+        let allObjects = audioProcessObjectList()
+        guard !allObjects.isEmpty else {
+            // プロセスオブジェクト一覧が取れない環境では、従来どおりメイン PID 単体に帰着させる。
+            #if canImport(os)
+            tapLog.info("process object list empty; fallback to single main PID tap")
+            #endif
+            return [try translatePIDToAudioObject(mainPID)]
+        }
+
+        var infos: [ProcessMatcher.ProcessInfo] = []
+        for obj in allObjects {
+            guard let objPID = processPID(obj) else { continue }
+            let objBundleId = bundleIdentifier(for: objPID)
+            let responsible = responsiblePID(for: objPID)
+            infos.append(
+                ProcessMatcher.ProcessInfo(
+                    audioObjectID: obj,
+                    pid: objPID,
+                    bundleId: objBundleId,
+                    responsiblePID: responsible
+                )
+            )
+        }
+
+        let target = ProcessMatcher.Target(mainPID: mainPID, bundleId: bundleId)
+        let chosen = infos.filter { ProcessMatcher.belongs($0, to: target) }
+        let selected = chosen.map(\.audioObjectID)
+
+        #if canImport(os)
+        // 実機切り分け用の診断ログ（info）: 集約したプロセス数・各 PID・bundleId（非混入の検証用）。
+        for info in chosen {
+            tapLog.info(
+                "tap target process: pid=\(info.pid) bundleId=\(info.bundleId ?? "nil", privacy: .public) responsiblePID=\(info.responsiblePID ?? -1) audioObjectID=\(info.audioObjectID)"
+            )
+        }
+        tapLog.info("aggregation: scanned=\(allObjects.count) matched=\(selected.count) for mainPID=\(mainPID) bundleId=\(bundleId ?? "nil", privacy: .public)")
+        #endif
+
+        // 万一マッチが空（一覧は取れたが対象が見つからない）なら、最後の安全網としてメイン PID 単体を試す。
+        if selected.isEmpty {
+            #if canImport(os)
+            tapLog.info("no match from process list; fallback to single main PID translate")
+            #endif
+            return [try translatePIDToAudioObject(mainPID)]
+        }
+        return selected
+    }
+
+    /// システム上の全オーディオプロセスオブジェクト（kAudioHardwarePropertyProcessObjectList）を取得する。
+    private func audioProcessObjectList() -> [AudioObjectID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        let sizeStatus = AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize
+        )
+        guard sizeStatus == noErr, dataSize > 0 else { return [] }
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        var objects = [AudioObjectID](repeating: AudioObjectID(kAudioObjectUnknown), count: count)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &objects
+        )
+        guard status == noErr else { return [] }
+        return objects
+    }
+
+    /// オーディオプロセスオブジェクトの PID（kAudioProcessPropertyPID）を取得する。取得不能なら nil。
+    private func processPID(_ object: AudioObjectID) -> pid_t? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyPID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var pid: pid_t = -1
+        var size = UInt32(MemoryLayout<pid_t>.size)
+        let status = AudioObjectGetPropertyData(object, &address, 0, nil, &size, &pid)
+        guard status == noErr, pid > 0 else { return nil }
+        return pid
+    }
+
+    /// PID から bundleId を取得する（NSRunningApplication）。取得不能なら nil（＝曖昧→除外側に倒す）。
+    private func bundleIdentifier(for pid: pid_t) -> String? {
+        #if canImport(AppKit)
+        return NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        #else
+        return nil
+        #endif
+    }
+
+    /// PID の責任プロセス（responsiblePID）を取得する。
+    /// TODO(実機検証): responsiblePID の安定取得 API（libproc / Core Audio）は macOS 26 実機で確定する
+    ///                （SPEC「ADR-8 で実機検証する事項」）。安定 API が未確定のため、初版は nil を返す
+    ///                （= responsiblePID 基準は使わず、メイン PID 一致 / bundleId 一致のみで判定）。
+    ///                bundleId が独立なヘルパー（Chrome Helper 等）の取りこぼしは実機で確認し、
+    ///                必要なら responsiblePID 取得をここに実装する（非混入を最優先・曖昧は除外側）。
+    private func responsiblePID(for pid: pid_t) -> pid_t? {
+        return nil
     }
 
     private func tapStreamDescription(_ tapID: AudioObjectID) throws -> AudioStreamBasicDescription {

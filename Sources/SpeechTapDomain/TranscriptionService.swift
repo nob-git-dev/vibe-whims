@@ -16,7 +16,11 @@ public actor TranscriptionService {
     private let permissionGate: PermissionGate
     private let sink: TranscriptSink
     private let store: TranscriptStore
-    private let locale: Locale
+    /// 次回 `start` で使う初期認識ロケール（ADR-7）。
+    /// `init` で config 由来の既定値を受け取り、`setRecognitionLocale(_:)` で上書きできる。
+    /// `running` / `stopping` 中の変更は当該セッションに反映せず、次回 `start` から有効
+    /// （実行中の locale 即時切替は SpeechAnalyzer セッションの作り直しが必要で初版スコープ外）。
+    private var recognitionLocale: Locale
     /// 観測点（OS 非依存の port）。既定は no-op。Composition Root で os.Logger 実装を注入する。
     private let eventLogger: EventLogger
 
@@ -59,7 +63,7 @@ public actor TranscriptionService {
         self.permissionGate = permissionGate
         self.sink = sink
         self.store = store
-        self.locale = locale
+        self.recognitionLocale = locale
         self.eventLogger = eventLogger
     }
 
@@ -81,6 +85,17 @@ public actor TranscriptionService {
     /// 文字起こし結果更新の通知ハンドラを登録する（presentation が UI 更新のために購読する）。
     public func setTranscriptUpdateHandler(_ handler: @escaping @Sendable () -> Void) {
         self.onTranscriptUpdate = handler
+    }
+
+    /// 現在の認識ロケール（ADR-7）。presentation の「認識言語」サブメニューでチェックマーク表示に使う。
+    public var currentRecognitionLocale: Locale { recognitionLocale }
+
+    /// 次回 `start` で使う初期認識ロケールを更新する（ADR-7）。
+    /// `running` / `stopping` 中も内部状態は更新するが、適用は**次回 `start` から**（実行中の即時切替は行わない）。
+    /// `init` の引数・`start` / `stop` の API・状態遷移は不変（既存テストを壊さない）。OS 型を漏らさず `Locale` のみ扱う。
+    public func setRecognitionLocale(_ locale: Locale) {
+        recognitionLocale = locale
+        eventLogger.log("recognition locale set -> \(locale.identifier) (applies on next start)")
     }
 
     private func transition(to newState: SessionState) {
@@ -122,7 +137,8 @@ public actor TranscriptionService {
             _stoppedAt = nil
             transition(to: .running(app))
 
-            let results = recognizer.transcribe(audioStream, locale: locale)
+            // ADR-7: 開始時点で保持している recognitionLocale を初期ロケールとして渡す。
+            let results = recognizer.transcribe(audioStream, locale: recognitionLocale)
             // recognitionTask は self が所有し、stop()/failed() で nil 化して破棄する。
             // actor の self を強参照しても、タスク完了または nil 化で循環は解消されるため weak にしない
             // （weak だとストリーム消費が静かに止まる挙動が分かりにくいため、意図を明確化して強参照とする）。

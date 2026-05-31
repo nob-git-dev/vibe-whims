@@ -21,6 +21,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 翻訳/エクスポート関連の状態通知（メニュー「状態」行に表示）。
     private var translationStatus: String = ""
 
+    // ADR-7: 認識言語選択。RecognitionCapabilities で取得した対応ロケール一覧と現在選択中ロケール。
+    private var recognitionCaps: RecognitionCapabilities?
+    private var supportedLocales: [Locale] = []
+    private var selectedLocale: Locale?
+
     // UI 状態。
     private var apps: [TargetApp] = []
     private var selectedApp: AppId?
@@ -35,15 +40,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let cfg = try loadConfig()
             self.config = cfg
             self.selectedApp = cfg.targetAppId
+            // ADR-7: config の LOCALE を初期選択（既定値）として尊重する（設定外部化を維持）。
+            self.selectedLocale = cfg.locale
+
+            // ADR-7: SpeechAnalyzerAdapter は SpeechRecognizer と RecognitionCapabilities を兼ねる。
+            // 同一インスタンスを domain（認識）と presentation（対応ロケール照会）で共用する。
+            let analyzerAdapter = SpeechAnalyzerAdapter()
+            self.recognitionCaps = analyzerAdapter
 
             // domain に port を注入（domain は具体型を知らない＝逆依存なし）。
-            // 注: TranscriptionService のコンストラクタは ADR-5/6 でも不変
-            //     （翻訳・エクスポートはサービス外で組み立てる / Composition Root 注入順序参照）。
+            // 注: TranscriptionService のコンストラクタは ADR-5/6/7 でも不変
+            //     （翻訳・エクスポートはサービス外で組み立てる / 認識言語は setRecognitionLocale で実行時上書き）。
             let service = TranscriptionService(
                 audioSource: ProcessTapAudioSource(),
-                recognizer: SpeechAnalyzerAdapter(),
+                recognizer: analyzerAdapter,
                 permissionGate: AudioCapturePermission(),
                 sink: FileTranscriptSink(outputPath: cfg.outputPath),
+                // ADR-7: 初期選択の既定値。メニュー選択で setRecognitionLocale が次回 start から上書きする。
                 locale: cfg.locale,
                 // domain の観測点を os.Logger 実装で注入（domain は OS 非依存のまま可観測化）。
                 eventLogger: OSEventLogger()
@@ -101,6 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         rebuildMenu()
         Task { await refreshApps() }
+        // ADR-7: 起動時に対応ロケール一覧を取得し、「認識言語」サブメニューを構築する。
+        Task { await refreshSupportedLocales() }
     }
 
     // MARK: - 設定解決
@@ -177,6 +192,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(stop)
         menu.addItem(.separator())
 
+        // ADR-7: 認識言語サブメニュー。選択は次回 start から有効（実行中の即時切替は行わない）。
+        let languageItem = NSMenuItem(title: "認識言語", action: nil, keyEquivalent: "")
+        languageItem.submenu = buildLanguageSubmenu()
+        menu.addItem(languageItem)
+        menu.addItem(.separator())
+
         let showWindow = NSMenuItem(title: "文字起こしを表示", action: #selector(showTranscriptAction), keyEquivalent: "w")
         showWindow.target = self
         menu.addItem(showWindow)
@@ -200,10 +221,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { await refreshApps() }
     }
 
+    // MARK: - 認識言語サブメニュー（ADR-7）
+
+    /// メニューに出す認識言語の一覧を組み立てる。
+    /// 最低限「日本語 / 英語」を先頭に提示し、RecognitionCapabilities から取得できた「その他」を続ける
+    /// （重複は除去）。取得できない環境でも空表示にしない（受け入れ条件）。
+    private func languageMenuLocales() -> [Locale] {
+        let defaults = [Locale(identifier: "ja-JP"), Locale(identifier: "en-US")]
+        var seen = Set<String>()
+        var result: [Locale] = []
+        for loc in defaults + supportedLocales {
+            let key = loc.identifier
+            if seen.insert(key).inserted {
+                result.append(loc)
+            }
+        }
+        return result
+    }
+
+    private func buildLanguageSubmenu() -> NSMenu {
+        let submenu = NSMenu()
+        let current = selectedLocale?.identifier
+        for loc in languageMenuLocales() {
+            let title = localizedLanguageName(loc)
+            let item = NSMenuItem(title: title, action: #selector(selectLocale(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = loc.identifier
+            item.state = (loc.identifier == current) ? .on : .off
+            submenu.addItem(item)
+        }
+        return submenu
+    }
+
+    /// ロケールの表示名（その言語の現地名 + 識別子）。
+    private func localizedLanguageName(_ locale: Locale) -> String {
+        let display = Locale.current.localizedString(forIdentifier: locale.identifier)
+            ?? locale.localizedString(forIdentifier: locale.identifier)
+            ?? locale.identifier
+        return "\(display)（\(locale.identifier)）"
+    }
+
+    @objc private func selectLocale(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        let locale = Locale(identifier: raw)
+        selectedLocale = locale
+        // 次回 start から有効（実行中の即時切替は行わない・ADR-7）。
+        Task { await service?.setRecognitionLocale(locale) }
+        rebuildMenu()
+    }
+
     private func refreshApps() async {
         let list = (try? await appEnumerator.listAudioCapableApps()) ?? []
         await MainActor.run {
             self.apps = list
+            self.rebuildMenu()
+        }
+    }
+
+    /// ADR-7: 認識器が対応する言語ロケール一覧を取得し、「認識言語」サブメニューを再構築する。
+    /// 取得できない場合でも presentation 側で最低限「日本語 / 英語」を提示する（空表示にしない）。
+    private func refreshSupportedLocales() async {
+        let locales = await recognitionCaps?.supportedLocales() ?? []
+        await MainActor.run {
+            self.supportedLocales = locales
             self.rebuildMenu()
         }
     }
