@@ -1,0 +1,20 @@
+# web_scraper_tool: 依存パッケージ（FU-SEC-15 / SPEC §S.6.1 pin 方針）
+# 下限: 安定版 / 上限: 既知のメジャー破壊変更を避けるための上限
+
+# ---- ランタイム依存 ----
+# 下限は SPEC §S.6.1 推奨に揃える。上限は「次のメジャー」を維持。
+httpx>=0.27,<1
+playwright>=1.55,<2
+beautifulsoup4>=4.12,<5
+lxml>=5.0
+trafilatura>=2.0,<3
+litellm>=1.50,<2
+jsonschema>=4.22,<5
+pydantic>=2.7,<3
+nest_asyncio>=1.6,<2
+
+# ---- 開発・テスト依存（CI で同居） ----
+pytest>=8.2,<9
+pytest-asyncio>=0.23,<1
+respx>=0.21,<1
+pytest-httpx>=0.30,<1

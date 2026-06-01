@@ -1,0 +1,29 @@
+# web_scraper_tool: 環境変数の雛形
+# 配置時のリネーム:
+#   cp dotenv-example.txt .env.example   # コミット対象（値は記述しない・必ず先頭 # を残す）
+#   cp dotenv-example.txt .env           # ローカル実行用・値を書き込んで使う（.gitignore 必須）
+#
+# 既定値は web_scraper_tool.py のモジュール定数（_DEFAULT_MODEL 等）で
+# 解決されます。下記 4 つの env で override 可能です。
+#
+# このファイルが .env.example ではなく dotenv-example.txt という名前なのは
+# 配布物としての配置時の都合です。利用時は上記コマンドでリネームしてください。
+
+# LLM モデル ID（既定: qwen3.5-122b）
+# WEB_SCRAPER_LLM_MODEL=qwen3.5-122b
+
+# LLM ベース URL（既定: http://localhost:8000/v1）
+# WEB_SCRAPER_LLM_BASE_URL=http://localhost:8000/v1
+
+# LLM API キー（既定: EMPTY。vLLM は無認証）
+# WEB_SCRAPER_LLM_API_KEY=EMPTY
+
+# thinking-mode LLM 対応。
+# 既定 false（litellm に extra_body.chat_template_kwargs.enable_thinking=False を渡す）。
+# qwen3.5-122b 等の thinking model で reasoning chain を抑止し、JSON 抽出を高速化する。
+# 非 thinking model (GPT-4o / Claude) では OpenAI 互換 API の慣例で無視される。
+# truthy 値: true / 1 / yes / on（大文字小文字無視）。それ以外はすべて false 扱い。
+# WEB_SCRAPER_LLM_ENABLE_THINKING=false
+
+# Playwright 起動時に --no-sandbox を付けたい場合のみ 1 を設定。
+# WEB_SCRAPER_PLAYWRIGHT_NO_SANDBOX=0

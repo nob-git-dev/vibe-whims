@@ -1,0 +1,14 @@
+name: web_scraper
+version: 0.1.0
+description: |
+  Structured JSON extraction from a single web page (URL + extraction schema → dict).
+  Wraps the in-repo web_scraper_tool/web_scraper_tool.py library with built-in
+  SSRF defense, robots.txt respect, and static + dynamic (Playwright) fallback.
+  Prefer this over web_extract when you need structured output rather than raw markdown.
+author: nob-git-dev
+kind: standalone
+platforms:
+  - linux
+  - macos
+provides_tools:
+  - web_scraper_extract
