@@ -2,14 +2,15 @@
 
 🌐 **English** | [日本語](#日本語)
 
-> A small collection of **AI-native software experiments** — two independent projects, each living on its own branch.
+> A small collection of **AI-native software experiments** — three independent projects, each living on its own branch.
 
 | Project | Branch | What it is |
 |---|---|---|
 | 🎮 **NES Binary Experiment** | [`main`](https://github.com/nob-git-dev/vibe-whims/tree/main) (this branch) | Can an AI emit a working binary **without writing source code**, by authoring annotated hex directly? Produces a real `.nes` ROM, playable in a Rust→WASM browser emulator. |
 | 🎙 **speech-tap** | [`speech-tap`](https://github.com/nob-git-dev/vibe-whims/tree/speech-tap) | A macOS menu-bar app that transcribes the audio of a **single chosen app** in real time, fully on-device, using Apple's new **SpeechAnalyzer** (macOS 26), **Core Audio Process Tap**, and the **Translation** framework. |
+| 🕷 **web-scraper** | [`web-scraper`](https://github.com/nob-git-dev/vibe-whims/tree/web-scraper) | A standalone Python package and a Hermes plugin that extract **structured JSON** from any URL given a JSON Schema (3-stage pipeline: static fetch → Playwright → LLM extraction; SSRF defense / robots.txt respect built in). Built with [the prompt-driven method from this Zenn article](https://zenn.dev/nobmake/articles/4958a180f651ca). |
 
-> The two projects share this repository only as a home for experiments — their code and git history are independent. Switch branches above to explore each. The rest of this page documents the **NES Binary Experiment** (this branch); see the [`speech-tap` branch README](https://github.com/nob-git-dev/vibe-whims/tree/speech-tap) for that project.
+> The three projects share this repository only as a home for experiments — their code and git history are independent. Switch branches above to explore each. The rest of this page documents the **NES Binary Experiment** (this branch); see each branch's README for the other projects.
 
 ---
 
@@ -103,14 +104,15 @@ emulator/             ← Rust→WASM NES emulator (browser)
 
 🌐 [English](#vibe-whims) | **日本語**
 
-> **AIネイティブなソフトウェア実験**の小さなコレクション。2つの独立したプロジェクトが、それぞれ別のブランチに存在します。
+> **AIネイティブなソフトウェア実験**の小さなコレクション。3つの独立したプロジェクトが、それぞれ別のブランチに存在します。
 
 | プロジェクト | ブランチ | 概要 |
 |---|---|---|
 | 🎮 **NES バイナリ実験** | [`main`](https://github.com/nob-git-dev/vibe-whims/tree/main)（このブランチ） | AIは**ソースコードを書かずに**、アノテーション付きの hex を直接書くことで動くバイナリを生成できるか？ 実際の `.nes` ROM を生成し、Rust→WASM のブラウザエミュレータで実行できる。 |
 | 🎙 **speech-tap** | [`speech-tap`](https://github.com/nob-git-dev/vibe-whims/tree/speech-tap) | **選んだ1つのアプリ**の音声だけを、完全オンデバイスでリアルタイム文字起こしする macOS メニューバーアプリ。Apple の新しい **SpeechAnalyzer**（macOS 26）・**Core Audio Process Tap**・**Translation** framework を使用。 |
+| 🕷 **web-scraper** | [`web-scraper`](https://github.com/nob-git-dev/vibe-whims/tree/web-scraper) | URL と JSON Schema を渡すと **構造化 JSON** を返す Python パッケージと Hermes プラグイン（静的取得 → Playwright → LLM 抽出 の 3 層パイプライン、SSRF 防御・robots.txt 尊重を内蔵）。[Zenn 記事のプロンプト駆動手法](https://zenn.dev/nobmake/articles/4958a180f651ca)で生成。 |
 
-> 2つのプロジェクトは、実験の置き場としてこのリポジトリを共有しているだけで、コードも git 履歴も独立しています。上のブランチを切り替えてそれぞれをご覧ください。このページの以降は **NES バイナリ実験**（このブランチ）の説明です。speech-tap は [`speech-tap` ブランチの README](https://github.com/nob-git-dev/vibe-whims/tree/speech-tap) を参照してください。
+> 3つのプロジェクトは、実験の置き場としてこのリポジトリを共有しているだけで、コードも git 履歴も独立しています。上のブランチを切り替えてそれぞれをご覧ください。このページの以降は **NES バイナリ実験**（このブランチ）の説明です。他のプロジェクトは各ブランチの README を参照してください。
 
 ---
 
