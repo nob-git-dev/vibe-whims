@@ -4,6 +4,8 @@
 
 > A small collection of **AI-native software experiments** — three independent projects, each living on its own branch.
 
+> Portfolio overview: [AI Agent Engineering Portfolio](https://github.com/nob-git-dev/ai-agent-portfolio)
+
 | Project | Branch | What it is |
 |---|---|---|
 | 🎮 **NES Binary Experiment** | [`main`](https://github.com/nob-git-dev/vibe-whims/tree/main) (this branch) | Can an AI emit a working binary **without writing source code**, by authoring annotated hex directly? Produces a real `.nes` ROM, playable in a Rust→WASM browser emulator. |
@@ -120,6 +122,8 @@ emulator/             ← Rust→WASM NES emulator (browser)
 🌐 [English](#vibe-whims) | **日本語**
 
 > **AIネイティブなソフトウェア実験**の小さなコレクション。3つの独立したプロジェクトが、それぞれ別のブランチに存在します。
+
+> 全体ポートフォリオ: [AI Agent Engineering Portfolio](https://github.com/nob-git-dev/ai-agent-portfolio)
 
 | プロジェクト | ブランチ | 概要 |
 |---|---|---|
