@@ -14,6 +14,21 @@
 
 ---
 
+## Portfolio Snapshot
+
+This repository demonstrates **AI-native prototyping beyond ordinary web apps**: low-level binary generation, OS-native APIs, and agent-facing tools with security constraints.
+
+| View | Details |
+|---|---|
+| **Problem** | How far can AI-assisted development go when the task involves low-level binaries, macOS system APIs, or agent tool integration rather than a conventional CRUD app? |
+| **Built** | NES Binary Experiment, speech-tap, and web-scraper: three independent experiments showing different constraints and verification styles. |
+| **Technical Focus** | Rust to WASM, 6502 / NES ROMs, Swift / Core Audio Process Tap / SpeechAnalyzer, Playwright, LLM extraction, SSRF defense, and agent tool integration. |
+| **AI Agent Role** | AI was used for prototyping, design assistance, implementation, and test scaffolding; the human role was to define the experiment, constraints, acceptance criteria, and verification lens. |
+| **Evidence** | Browser-playable NES emulator, Swift test suite in `speech-tap`, mocked security-focused tests in `web-scraper`, and documented limitations in each branch. |
+| **Maturity** | Public experiments for demonstrating AI-native development range and live-coding capability; not positioned as production software by default. |
+
+---
+
 ## 🎮 NES Binary Experiment
 
 > **Can AI output binary directly — without writing source code?**
@@ -113,6 +128,22 @@ emulator/             ← Rust→WASM NES emulator (browser)
 | 🕷 **web-scraper** | [`web-scraper`](https://github.com/nob-git-dev/vibe-whims/tree/web-scraper) | URL と JSON Schema を渡すと **構造化 JSON** を返す Python パッケージと Hermes プラグイン（静的取得 → Playwright → LLM 抽出 の 3 層パイプライン、SSRF 防御・robots.txt 尊重を内蔵）。[Zenn 記事のプロンプト駆動手法](https://zenn.dev/nobmake/articles/4958a180f651ca)で生成。 |
 
 > 3つのプロジェクトは、実験の置き場としてこのリポジトリを共有しているだけで、コードも git 履歴も独立しています。上のブランチを切り替えてそれぞれをご覧ください。このページの以降は **NES バイナリ実験**（このブランチ）の説明です。他のプロジェクトは各ブランチの README を参照してください。
+
+---
+
+## Portfolio Snapshot
+
+このリポジトリは、通常の Web アプリに閉じない **AI ネイティブなプロトタイピング能力**を示すための実験集です。
+低レイヤーのバイナリ生成、OS ネイティブ API、セキュリティ制約のあるエージェント向けツール実装を扱っています。
+
+| 観点 | 内容 |
+|---|---|
+| **Problem** | AI 支援開発は、一般的な CRUD アプリ以外の低レイヤー、macOS システム API、エージェント連携にどこまで適用できるのか。 |
+| **Built** | NES バイナリ実験、speech-tap、web-scraper の 3 つの独立実験。 |
+| **Technical Focus** | Rust to WASM、6502 / NES ROM、Swift / Core Audio Process Tap / SpeechAnalyzer、Playwright、LLM extraction、SSRF defense、agent tool integration。 |
+| **AI Agent Role** | AI をプロトタイプ生成、設計補助、実装、テスト整備に活用し、人間は実験テーマ、制約条件、受け入れ条件、検証観点を定義。 |
+| **Evidence** | ブラウザで遊べる NES emulator、`speech-tap` の Swift test suite、`web-scraper` のモックベーステストとセキュリティ設計、各ブランチの制約事項ドキュメント。 |
+| **Maturity** | AI ネイティブ開発能力とライブコーディング実績を示すための公開実験。本番利用前提ではない。 |
 
 ---
 
