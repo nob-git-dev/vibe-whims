@@ -76,9 +76,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // 機能A / ADR-6: 停止フロー駆動（Downloads 複本書き出し → 表示クリア確認）。
             // TranscriptionService.stop() の API は不変、`.stopped` 遷移を観測して駆動する。
             let exporter = DownloadsSessionExporter()
+            let transcriptCorrector = cfg.llmCorrection.map { OpenAICompatibleTranscriptCorrector(config: $0) }
+            let correctedExporter = cfg.llmCorrection.map { _ in DownloadsCorrectedTranscriptExporter() }
             // window はまだ作っていないので nil 始まりで OK（最初に表示要求が来た時に作る）。
             let coordinator = StopFlowCoordinator(
                 exporter: exporter,
+                transcriptCorrector: transcriptCorrector,
+                correctedExporter: correctedExporter,
                 service: service,
                 window: nil,
                 onStatusMessage: { [weak self] message in
@@ -138,10 +142,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "🎙"
-        item.button?.toolTip = "SpeechTap"
         item.menu = menu
         self.statusItem = item
+        updateStatusItemIcon(recording: false)
+    }
+
+    private func updateStatusItemIcon(recording: Bool) {
+        guard let button = statusItem?.button else { return }
+        button.toolTip = recording ? "SpeechTap - REC" : "SpeechTap"
+        button.imagePosition = .imageOnly
+        button.title = ""
+
+        let symbolName = recording ? "mic.fill" : "mic"
+        if let image = NSImage(
+            systemSymbolName: symbolName,
+            accessibilityDescription: recording ? "SpeechTap recording" : "SpeechTap"
+        ) {
+            image.isTemplate = true
+            button.attributedTitle = NSAttributedString(string: "")
+            button.image = image
+            button.contentTintColor = recording ? .systemRed : .labelColor
+            return
+        }
+
+        button.image = nil
+        button.imagePosition = .noImage
+        button.attributedTitle = NSAttributedString(
+            string: recording ? "REC" : "🎙",
+            attributes: [
+                .foregroundColor: recording ? NSColor.systemRed : NSColor.labelColor,
+                .font: NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            ]
+        )
     }
 
     private func rebuildMenu() {
@@ -322,6 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 状態反映
 
     private func onStateChanged(_ state: SessionState) {
+        var recording = false
         switch state {
         case .idle: latestStateText = "idle"
         case .selected: latestStateText = "選択済み"
@@ -329,11 +362,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .awaitingPermission:
             latestStateText = "権限未許可"
             presentPermissionGuidance()
-        case .running: latestStateText = "文字化中"
+        case .running:
+            latestStateText = "文字化中"
+            recording = true
         case .stopping: latestStateText = "停止処理中"
         case .stopped: latestStateText = "停止"
         case .error(let msg): latestStateText = "エラー: \(msg)"
         }
+        updateStatusItemIcon(recording: recording)
         rebuildMenu()
         updateTranscriptWindow()
     }

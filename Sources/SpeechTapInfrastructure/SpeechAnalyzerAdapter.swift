@@ -43,6 +43,72 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, RecognitionCapabilit
     }
     private var _session: Any?
 
+    private final class AnalyzerTimingProbe: @unchecked Sendable {
+        struct Snapshot {
+            let firstAudioWallTime: Double
+            let latestCaptureWallTime: Double
+            let fedAudioSeconds: Double
+            let fedFrameCount: Int
+        }
+
+        private let lock = NSLock()
+        private var firstAudioWallTime: Double?
+        private var latestCaptureWallTime: Double?
+        private var fedAudioSeconds: Double = 0
+        private var fedFrameCount: Int = 0
+
+        func recordFedFrame(captureWallTime: Double, durationSeconds: Double) -> Snapshot {
+            lock.lock()
+            defer { lock.unlock() }
+            if firstAudioWallTime == nil {
+                firstAudioWallTime = captureWallTime
+            }
+            latestCaptureWallTime = captureWallTime
+            fedAudioSeconds += max(0, durationSeconds)
+            fedFrameCount += 1
+            return Snapshot(
+                firstAudioWallTime: firstAudioWallTime ?? captureWallTime,
+                latestCaptureWallTime: latestCaptureWallTime ?? captureWallTime,
+                fedAudioSeconds: fedAudioSeconds,
+                fedFrameCount: fedFrameCount
+            )
+        }
+
+        func snapshot() -> Snapshot? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let firstAudioWallTime, let latestCaptureWallTime else {
+                return nil
+            }
+            return Snapshot(
+                firstAudioWallTime: firstAudioWallTime,
+                latestCaptureWallTime: latestCaptureWallTime,
+                fedAudioSeconds: fedAudioSeconds,
+                fedFrameCount: fedFrameCount
+            )
+        }
+    }
+
+    private static func audioLevel(samples: [Float]) -> (rmsDBFS: Double, peakDBFS: Double) {
+        guard !samples.isEmpty else { return (-120, -120) }
+        var sumSquares: Double = 0
+        var peak: Double = 0
+        for sample in samples {
+            let value = Double(sample)
+            let magnitude = abs(value)
+            sumSquares += value * value
+            if magnitude > peak {
+                peak = magnitude
+            }
+        }
+        let rms = sqrt(sumSquares / Double(samples.count))
+        let floor = 0.000_001
+        return (
+            rmsDBFS: 20 * log10(max(rms, floor)),
+            peakDBFS: 20 * log10(max(peak, floor))
+        )
+    }
+
     @available(macOS 26.0, *)
     private func currentSession() -> Session? {
         stateLock.lock(); defer { stateLock.unlock() }
@@ -175,6 +241,7 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, RecognitionCapabilit
                     let feedReceived = Atomic<Int>(0)
                     let feedConverted = Atomic<Int>(0)
                     let feedDropped = Atomic<Int>(0)
+                    let timingProbe = AnalyzerTimingProbe()
 
                     // 入力供給タスク: AudioFrame → 変換 → AVAudioPCMBuffer → AnalyzerInput。
                     let feeder = Task {
@@ -191,9 +258,26 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, RecognitionCapabilit
                                let buffer = converter.convertBuffer(sourceBuffer, to: analyzerFormat) {
                                 inputCont.yield(AnalyzerInput(buffer: buffer))
                                 let y = feedConverted.add(1, ordering: .relaxed).newValue
+                                let sampleRate = max(buffer.format.sampleRate, 1)
+                                let durationSeconds = Double(buffer.frameLength) / sampleRate
+                                let timing = timingProbe.recordFedFrame(
+                                    captureWallTime: frame.timestamp,
+                                    durationSeconds: durationSeconds
+                                )
                                 #if canImport(os)
-                                if y <= 3 {
-                                    log.info("feeder yielded buffer #\(y): inSamples=\(frame.samples.count) bufferFrames=\(buffer.frameLength)")
+                                if y <= 3 || y % 100 == 0 {
+                                    let level = Self.audioLevel(samples: frame.samples)
+                                    log.info(
+                                        """
+                                        feedTiming frame=\(y) inSamples=\(frame.samples.count) \
+                                        bufferFrames=\(buffer.frameLength) \
+                                        bufferDuration=\(String(format: "%.3f", durationSeconds), privacy: .public) \
+                                        fedAudioSeconds=\(String(format: "%.3f", timing.fedAudioSeconds), privacy: .public) \
+                                        rmsDBFS=\(String(format: "%.1f", level.rmsDBFS), privacy: .public) \
+                                        peakDBFS=\(String(format: "%.1f", level.peakDBFS), privacy: .public) \
+                                        captureWall=\(String(format: "%.3f", frame.timestamp), privacy: .public)
+                                        """
+                                    )
                                 }
                                 #endif
                             } else {
@@ -219,18 +303,47 @@ public final class SpeechAnalyzerAdapter: SpeechRecognizer, RecognitionCapabilit
                     var volatileResults = 0
                     var finalizedResults = 0
                     for try await result in transcriber.results {
+                        let receivedWallTime = Date().timeIntervalSinceReferenceDate
                         let text = String(result.text.characters)
                         let start = result.range.start.seconds
                         let end = result.range.end.seconds
                         let range: ClosedRange<Double>? = (start.isFinite && end.isFinite && end >= start) ? start...end : nil
                         #if canImport(os)
+                        let resultKind: String
+                        let resultIndex: Int
                         if result.isFinal {
                             finalizedResults += 1
-                            log.info("results received finalized #\(finalizedResults) len=\(text.count)")
+                            resultKind = "final"
+                            resultIndex = finalizedResults
                         } else {
                             volatileResults += 1
-                            if volatileResults <= 3 || volatileResults % 20 == 0 {
-                                log.info("results received volatile #\(volatileResults) len=\(text.count)")
+                            resultKind = "volatile"
+                            resultIndex = volatileResults
+                        }
+                        let shouldLogTiming = result.isFinal || volatileResults <= 20 || volatileResults % 10 == 0
+                        if shouldLogTiming {
+                            if let range, let timing = timingProbe.snapshot() {
+                                let rangeStart = range.lowerBound
+                                let rangeEnd = range.upperBound
+                                let latencyFromStart = receivedWallTime - (timing.firstAudioWallTime + rangeStart)
+                                let latencyFromEnd = receivedWallTime - (timing.firstAudioWallTime + rangeEnd)
+                                log.info(
+                                    """
+                                    resultTiming kind=\(resultKind, privacy: .public) index=\(resultIndex) \
+                                    chars=\(text.count) \
+                                    rangeStart=\(String(format: "%.3f", rangeStart), privacy: .public) \
+                                    rangeEnd=\(String(format: "%.3f", rangeEnd), privacy: .public) \
+                                    rangeDuration=\(String(format: "%.3f", rangeEnd - rangeStart), privacy: .public) \
+                                    latencyFromRangeStart=\(String(format: "%.3f", latencyFromStart), privacy: .public) \
+                                    latencyFromRangeEnd=\(String(format: "%.3f", latencyFromEnd), privacy: .public) \
+                                    fedAudioSeconds=\(String(format: "%.3f", timing.fedAudioSeconds), privacy: .public) \
+                                    fedFrames=\(timing.fedFrameCount)
+                                    """
+                                )
+                            } else {
+                                log.info(
+                                    "resultTiming kind=\(resultKind, privacy: .public) index=\(resultIndex) chars=\(text.count) noRangeOrNoAudioTiming=true"
+                                )
                             }
                         }
                         #endif

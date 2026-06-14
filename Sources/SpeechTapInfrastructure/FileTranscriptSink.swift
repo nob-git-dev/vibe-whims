@@ -20,7 +20,7 @@ public actor FileTranscriptSink: TranscriptSink {
 
     public init(outputPath: String) {
         // 出力先パスの ~ を展開する（URL(fileURLWithPath:) は展開しないため、
-        // 設定例の ~/Documents/... がカレント配下の "~" になる事故を防ぐ）。
+        // 設定例の ~/Downloads/... がカレント配下の "~" になる事故を防ぐ）。
         let expanded = (outputPath as NSString).expandingTildeInPath
         self.outputURL = URL(fileURLWithPath: expanded)
     }

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>SpeechTap</title>
+  <options customize="never" require-scripts="true" hostArchitectures="arm64"/>
+  <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+
+  <!-- SpeechAnalyzer / SpeechTranscriber are available on macOS 26.0+.
+       Core Audio Process Tap is older, so Speech is the effective OS floor. -->
+  <allowed-os-versions>
+    <os-version min="26.0"/>
+  </allowed-os-versions>
+
+  <installation-check script="checkSpeechTapRequirements();"/>
+  <script>
+  <![CDATA[
+  function checkSpeechTapRequirements() {
+    if (system.compareVersions(system.version.ProductVersion, "26.0") < 0) {
+      my.result.title = "SpeechTap cannot be installed on this Mac";
+      my.result.message = "SpeechTap requires macOS 26.0 or later because it uses Apple's SpeechAnalyzer / SpeechTranscriber APIs.";
+      my.result.type = "Fatal";
+      return false;
+    }
+
+    var arm64 = system.sysctl("hw.optional.arm64");
+    if (!(arm64 == 1 || arm64 == "1" || arm64 == true)) {
+      my.result.title = "SpeechTap requires Apple Silicon";
+      my.result.message = "This package contains only an arm64 binary. Install it on an Apple Silicon Mac such as an M1 MacBook Air or later.";
+      my.result.type = "Fatal";
+      return false;
+    }
+
+    return true;
+  }
+  ]]>
+  </script>
+
+  <choices-outline>
+    <line choice="default"/>
+  </choices-outline>
+
+  <choice id="default" title="SpeechTap">
+    <pkg-ref id="com.example.speech-tap.component"/>
+  </choice>
+
+  <pkg-ref id="com.example.speech-tap.component" version="0.1.0" onConclusion="none">SpeechTap-arm64-component.pkg</pkg-ref>
+</installer-gui-script>

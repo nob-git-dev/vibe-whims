@@ -17,6 +17,8 @@ import SpeechTapDomain
 @MainActor
 final class StopFlowCoordinator {
     private let exporter: SessionExporter
+    private let transcriptCorrector: TranscriptCorrector?
+    private let correctedExporter: CorrectedTranscriptExporter?
     private let service: TranscriptionService
     /// 文字起こしウィンドウ（遅延生成されるため、生成後に setWindow で渡す）。
     private weak var window: TranscriptWindowController?
@@ -25,11 +27,15 @@ final class StopFlowCoordinator {
 
     init(
         exporter: SessionExporter,
+        transcriptCorrector: TranscriptCorrector? = nil,
+        correctedExporter: CorrectedTranscriptExporter? = nil,
         service: TranscriptionService,
         window: TranscriptWindowController?,
         onStatusMessage: @escaping (String) -> Void
     ) {
         self.exporter = exporter
+        self.transcriptCorrector = transcriptCorrector
+        self.correctedExporter = correctedExporter
         self.service = service
         self.window = window
         self.onStatusMessage = onStatusMessage
@@ -72,11 +78,32 @@ final class StopFlowCoordinator {
             onStatusMessage("セッション複本を書き出しました: \(url.lastPathComponent)")
         }
 
-        // 3. 表示クリア確認ダイアログ（メインファイルには影響しない旨をメッセージに明記）。
+        // 3. LLM 校正が明示的に有効なら corrected 複本を書き出す。
+        await runCorrectionIfEnabled(session: session)
+
+        // 4. 表示クリア確認ダイアログ（メインファイルには影響しない旨をメッセージに明記）。
         let shouldClear = await askClearDisplay()
         if shouldClear {
             store.clearDisplay()
             window?.clear()
+        }
+    }
+
+    private func runCorrectionIfEnabled(session: TranscriptSession) async {
+        guard let transcriptCorrector, let correctedExporter else { return }
+        let rawTranscript = TranscriptCorrectionPrompt.rawTranscript(from: session)
+        guard !rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        onStatusMessage("LLM 校正中...")
+        do {
+            let corrected = try await transcriptCorrector.correct(rawTranscript: rawTranscript)
+            let url = try await correctedExporter.export(correctedText: corrected, originalSession: session)
+            onStatusMessage("LLM 校正を書き出しました: \(url.lastPathComponent)")
+        } catch {
+            presentInfo("LLM 校正に失敗しました: \(error)")
+            onStatusMessage("LLM 校正に失敗（原文保存は完了済み）")
         }
     }
 

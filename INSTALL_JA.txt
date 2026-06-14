@@ -1,0 +1,140 @@
+SpeechTap インストールマニュアル
+================================
+
+対象
+----
+
+- Apple Silicon Mac（M1 / M2 / M3 / M4 など）
+- macOS 26.0 以降
+- 配布ファイル: SpeechTap-arm64.pkg
+
+注意
+----
+
+- このアプリはローカル配布用の ad-hoc 署名版です。
+- Gatekeeper により初回起動が止められる場合があります。
+- その場合は、この手順に含まれる quarantine 解除コマンドを実行してください。
+- quarantine 解除は、配布元を信頼できる場合だけ実行してください。
+
+
+1. SpeechTap-arm64.pkg を Mac に置く
+-----------------------------------
+
+配布された SpeechTap-arm64.pkg を、インストールしたい Mac にコピーします。
+
+例:
+- AirDrop で受け取る
+- USB メモリでコピーする
+- Downloads フォルダに保存する
+
+
+2. pkg をインストールする
+-------------------------
+
+1. Finder で SpeechTap-arm64.pkg をダブルクリックします。
+2. インストーラが開いたら、画面の指示に従ってインストールします。
+3. インストール先は通常 /Applications です。
+4. インストール完了後、/Applications/SpeechTap.app が存在することを確認します。
+
+インストーラ起動時の環境チェック:
+
+- macOS 26.0 以降かを確認します。
+- Apple Silicon Mac（arm64）かを確認します。
+- 条件を満たさない場合、SpeechTap.app をコピーする前にインストールを停止します。
+
+このチェックは、文字起こしに必須の Apple SpeechAnalyzer / SpeechTranscriber API が
+macOS 26.0 以降に含まれているためです。
+
+
+3. ターミナルを起動する
+-----------------------
+
+Gatekeeper 回避コマンドを実行するため、まずターミナルを起動します。
+
+起動方法:
+
+1. Finder を開きます。
+2. 「アプリケーション」を開きます。
+3. 「ユーティリティ」フォルダを開きます。
+4. 「ターミナル」をダブルクリックします。
+
+別の方法:
+
+1. Command + Space を押して Spotlight を開きます。
+2. 「ターミナル」と入力します。
+3. Return キーを押します。
+
+
+4. Gatekeeper の quarantine 属性を解除する
+------------------------------------------
+
+ターミナルに以下をそのまま貼り付けて、Return キーを押します。
+
+    xattr -dr com.apple.quarantine /Applications/SpeechTap.app
+
+このコマンドは、/Applications/SpeechTap.app に付いている quarantine 属性を削除します。
+
+エラーが出ずに次の入力待ちに戻れば完了です。
+
+
+5. SpeechTap を起動する
+-----------------------
+
+1. Finder で /Applications を開きます。
+2. SpeechTap.app をダブルクリックします。
+3. メニューバーにマイクアイコンが表示されれば起動成功です。
+
+初回の音声キャプチャ許可:
+
+1. 文字化を開始すると、音声キャプチャ許可のダイアログが出る場合があります。
+2. SpeechTap が選択したアプリの音声を取得できるように許可します。
+3. 許可後、必要に応じて SpeechTap を再起動してください。
+
+
+6. 基本的な使い方
+-----------------
+
+1. メニューバーの SpeechTap マイクアイコンをクリックします。
+2. 「対象アプリを選択」から文字起こししたいアプリを選びます。
+3. 「文字化を開始」をクリックします。
+4. 録音中はメニューバーのマイクアイコンが赤くなります。
+5. 「文字起こしを表示」で文字起こしウィンドウを開けます。
+6. 終了する場合は「文字化を停止」をクリックします。
+
+
+7. 保存先
+---------
+
+既定の保存先は以下です。
+
+    ~/Downloads/speech-tap/transcript.txt
+
+停止時には、そのセッション分の独立ファイルも Downloads に作成されます。
+
+例:
+
+    ~/Downloads/speech-tap-YYYYMMDD-HHmmss.txt
+
+
+8. 起動できない場合
+-------------------
+
+SpeechTap.app が開けない場合は、以下を確認してください。
+
+- /Applications/SpeechTap.app が存在するか
+- ターミナルで quarantine 解除コマンドを実行したか
+- macOS 26.0 以降か
+- Apple Silicon Mac か
+
+quarantine 解除コマンドを再実行する場合:
+
+    xattr -dr com.apple.quarantine /Applications/SpeechTap.app
+
+それでも開けない場合は、ターミナルで次のコマンドを実行して署名状態を確認できます。
+
+    codesign --verify --verbose=2 /Applications/SpeechTap.app
+
+問題がなければ、次のような内容が表示されます。
+
+    /Applications/SpeechTap.app: valid on disk
+    /Applications/SpeechTap.app: satisfies its Designated Requirement

@@ -6,4 +6,5 @@ public protocol Config: Sendable {
     var targetAppId: AppId? { get }
     var locale: Locale { get }
     var outputPath: String { get }
+    var llmCorrection: LLMCorrectionConfig? { get }
 }
